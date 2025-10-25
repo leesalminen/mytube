@@ -25,6 +25,7 @@ protocol NostrClient: AnyObject {
     func subscribe(_ subscription: NostrSubscription, on relays: [URL]?) async throws
     func unsubscribe(id: String, on relays: [URL]?) async
     func events() -> AsyncStream<NostrEvent>
+    func relayStatuses() async -> [RelayHealth]
 }
 
 /// Placeholder implementation that records relay configuration but does not yet open sockets.
@@ -76,5 +77,18 @@ final class StubNostrClient: NostrClient {
 
     func events() -> AsyncStream<NostrEvent> {
         eventStream
+    }
+
+    func relayStatuses() async -> [RelayHealth] {
+        connectedRelays.map {
+            RelayHealth(url: $0,
+                        status: .connected,
+                        retryAttempt: 0,
+                        lastSuccess: Date(),
+                        lastFailure: nil,
+                        nextRetry: nil,
+                        errorDescription: nil,
+                        activeSubscriptions: 0)
+        }
     }
 }

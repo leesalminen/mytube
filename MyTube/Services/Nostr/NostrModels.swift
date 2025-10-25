@@ -93,6 +93,45 @@ enum MyTubeEventKind: Int {
     case directMessage = 14
 }
 
+/// Snapshot describing the connection health of a relay.
+struct RelayHealth: Identifiable, Codable, Sendable {
+    enum Status: String, Codable, Sendable {
+        case connecting
+        case connected
+        case waitingRetry
+        case disconnected
+    }
+
+    var url: URL
+    var status: Status
+    var retryAttempt: Int
+    var lastSuccess: Date?
+    var lastFailure: Date?
+    var nextRetry: Date?
+    var errorDescription: String?
+    var activeSubscriptions: Int
+
+    var id: String { url.absoluteString }
+
+    init(url: URL,
+         status: Status = .connecting,
+         retryAttempt: Int = 0,
+         lastSuccess: Date? = nil,
+         lastFailure: Date? = nil,
+         nextRetry: Date? = nil,
+         errorDescription: String? = nil,
+         activeSubscriptions: Int = 0) {
+        self.url = url
+        self.status = status
+        self.retryAttempt = retryAttempt
+        self.lastSuccess = lastSuccess
+        self.lastFailure = lastFailure
+        self.nextRetry = nextRetry
+        self.errorDescription = errorDescription
+        self.activeSubscriptions = activeSubscriptions
+    }
+}
+
 extension NostrEvent {
     func tagValue(for key: String) -> String? {
         guard let tag = tags.first(where: { $0.first?.lowercased() == key.lowercased() }) else {

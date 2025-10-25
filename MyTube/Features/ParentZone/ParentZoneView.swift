@@ -9,10 +9,12 @@ import SwiftUI
 import UIKit
 
 struct ParentZoneView: View {
+    private let environment: AppEnvironment
     @StateObject private var viewModel: ParentZoneViewModel
     @State private var shareURL: URL?
 
     init(environment: AppEnvironment) {
+        self.environment = environment
         _viewModel = StateObject(wrappedValue: ParentZoneViewModel(environment: environment))
     }
 
@@ -62,16 +64,19 @@ struct ParentZoneView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(viewModel.relayEndpoints) { endpoint in
-                        HStack {
+                        HStack(alignment: .top, spacing: 12) {
                             Toggle(isOn: Binding(
                                 get: {
                                     viewModel.relayEndpoints.first(where: { $0.id == endpoint.id })?.isEnabled ?? false
                                 },
                                 set: { viewModel.setRelay(id: endpoint.id, enabled: $0) }
                             )) {
-                                Text(endpoint.urlString)
-                                    .font(.subheadline)
-                                    .textSelection(.enabled)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(endpoint.urlString)
+                                        .font(.subheadline)
+                                        .textSelection(.enabled)
+                                    relayStatusView(for: viewModel.status(for: endpoint))
+                                }
                             }
                             .toggleStyle(.switch)
 
@@ -139,6 +144,14 @@ struct ParentZoneView: View {
                 }
                 Button("Refresh Videos") {
                     viewModel.refreshVideos()
+                }
+            }
+
+            Section("Diagnostics") {
+                NavigationLink {
+                    NostrDiagnosticsView(environment: environment)
+                } label: {
+                    Label("Nostr Relay Smoke Test", systemImage: "waveform.circle")
                 }
             }
 
@@ -213,6 +226,71 @@ struct ParentZoneView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
+    }
+}
+
+private extension ParentZoneView {
+    @ViewBuilder
+    func relayStatusView(for status: RelayHealth?) -> some View {
+        if let status {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(color(for: status.status))
+                        .frame(width: 8, height: 8)
+                    Text(statusText(for: status))
+                        .font(.caption)
+                        .foregroundStyle(color(for: status.status))
+                }
+                if let error = status.errorDescription,
+                   !error.isEmpty,
+                   status.status == .waitingRetry {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        } else {
+            Text("Awaiting status…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    func statusText(for status: RelayHealth) -> String {
+        switch status.status {
+        case .connected:
+            let count = status.activeSubscriptions
+            return count > 0 ? "Connected • \(count) subs" : "Connected"
+        case .connecting:
+            return "Connecting…"
+        case .waitingRetry:
+            let attempt = status.retryAttempt
+            if let next = status.nextRetry {
+                let formatter = RelativeDateTimeFormatter()
+                formatter.unitsStyle = .short
+                let delta = formatter.localizedString(for: next, relativeTo: Date())
+                return "Retrying \(delta) • attempt \(attempt)"
+            } else {
+                return "Retrying • attempt \(attempt)"
+            }
+        case .disconnected:
+            return "Disconnected"
+        }
+    }
+
+    func color(for status: RelayHealth.Status) -> Color {
+        switch status {
+        case .connected:
+            return .green
+        case .connecting:
+            return .blue
+        case .waitingRetry:
+            return .orange
+        case .disconnected:
+            return .secondary
+        }
     }
 }
 

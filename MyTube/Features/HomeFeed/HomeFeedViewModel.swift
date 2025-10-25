@@ -14,11 +14,13 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     @Published private(set) var hero: RankingEngine.RankedVideo?
     @Published private(set) var rankedVideos: [RankingEngine.RankedVideo] = []
     @Published private(set) var shelves: [RankingEngine.Shelf: [RankingEngine.RankedVideo]] = [:]
+    @Published private(set) var sharedVideos: [RemoteVideoModel] = []
     @Published private(set) var error: String?
 
     private weak var environment: AppEnvironment?
     private var profile: ProfileModel?
     private var fetchedResultsController: NSFetchedResultsController<VideoEntity>?
+    private var remoteFetchedResultsController: NSFetchedResultsController<RemoteVideoEntity>?
 
     func bind(to environment: AppEnvironment) {
         guard self.environment == nil else { return }
@@ -31,6 +33,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         guard let environment else { return }
         self.profile = profile
         configureFetchedResultsController(profile: profile, environment: environment)
+        configureRemoteFetchedResultsController(environment: environment)
     }
 
     private func observeProfileChanges(_ environment: AppEnvironment) {
@@ -65,6 +68,30 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         }
     }
 
+    private func configureRemoteFetchedResultsController(environment: AppEnvironment) {
+        remoteFetchedResultsController?.delegate = nil
+
+        let fetchRequest = RemoteVideoEntity.fetchRequest()
+        fetchRequest.predicate = NSPredicate(format: "status == %@", "available")
+        fetchRequest.sortDescriptors = [NSSortDescriptor(keyPath: \RemoteVideoEntity.createdAt, ascending: false)]
+
+        let controller = NSFetchedResultsController(
+            fetchRequest: fetchRequest,
+            managedObjectContext: environment.persistence.viewContext,
+            sectionNameKeyPath: nil,
+            cacheName: nil
+        )
+        controller.delegate = self
+        remoteFetchedResultsController = controller
+
+        do {
+            try controller.performFetch()
+            updateSharedVideos()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     private func recomputeRanking() {
         guard
             let environment,
@@ -91,11 +118,23 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         shelves = result.shelves
     }
 
+    private func updateSharedVideos() {
+        guard let entities = remoteFetchedResultsController?.fetchedObjects else {
+            sharedVideos = []
+            return
+        }
+        sharedVideos = entities.compactMap(RemoteVideoModel.init(entity:))
+    }
+
     private var cancellables: Set<AnyCancellable> = []
 }
 
 extension HomeFeedViewModel: NSFetchedResultsControllerDelegate {
     func controllerDidChangeContent(_ controller: NSFetchedResultsController<NSFetchRequestResult>) {
-        recomputeRanking()
+        if controller === fetchedResultsController {
+            recomputeRanking()
+        } else if controller === remoteFetchedResultsController {
+            updateSharedVideos()
+        }
     }
 }

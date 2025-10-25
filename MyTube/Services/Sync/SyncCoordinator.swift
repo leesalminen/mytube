@@ -21,10 +21,22 @@ actor SyncCoordinator {
     private var state: State = .idle
     private let logger = Logger(subsystem: "com.mytube", category: "SyncCoordinator")
 
-    init(persistence: PersistenceController, nostrClient: NostrClient, relayDirectory: RelayDirectory) {
+    init(
+        persistence: PersistenceController,
+        nostrClient: NostrClient,
+        relayDirectory: RelayDirectory,
+        keyStore: KeychainKeyStore,
+        cryptoService: CryptoEnvelopeService
+    ) {
         self.nostrClient = nostrClient
         self.relayDirectory = relayDirectory
-        self.eventReducer = NostrEventReducer(context: SyncReducerContext(persistence: persistence))
+        self.eventReducer = NostrEventReducer(
+            context: SyncReducerContext(
+                persistence: persistence,
+                keyStore: keyStore,
+                cryptoService: cryptoService
+            )
+        )
     }
 
     func start() async {
@@ -60,6 +72,10 @@ actor SyncCoordinator {
         eventTask = nil
         state = .idle
         await nostrClient.disconnect()
+    }
+
+    func relayStatuses() async -> [RelayHealth] {
+        await nostrClient.relayStatuses()
     }
 
     private func consumeEvents() async {

@@ -19,6 +19,7 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var calmModeEnabled: Bool
     @Published var relayEndpoints: [RelayDirectory.Endpoint] = []
     @Published var newRelayURL: String = ""
+    @Published var relayStatuses: [RelayHealth] = []
 
     private let environment: AppEnvironment
     private let parentAuth: ParentAuth
@@ -149,9 +150,13 @@ final class ParentZoneViewModel: ObservableObject {
 
     func loadRelays() {
         Task {
-            let endpoints = await environment.relayDirectory.allEndpoints()
+            async let endpointsTask = environment.relayDirectory.allEndpoints()
+            async let statusesTask = environment.syncCoordinator.relayStatuses()
+            let endpoints = await endpointsTask
+            let statuses = await statusesTask
             await MainActor.run {
                 self.relayEndpoints = endpoints
+                self.relayStatuses = statuses
             }
         }
     }
@@ -162,9 +167,13 @@ final class ParentZoneViewModel: ObservableObject {
         Task {
             await environment.relayDirectory.setRelay(url, enabled: enabled)
             await environment.syncCoordinator.refreshRelays()
-            let endpoints = await environment.relayDirectory.allEndpoints()
+            async let endpointsTask = environment.relayDirectory.allEndpoints()
+            async let statusesTask = environment.syncCoordinator.relayStatuses()
+            let endpoints = await endpointsTask
+            let statuses = await statusesTask
             await MainActor.run {
                 self.relayEndpoints = endpoints
+                self.relayStatuses = statuses
             }
         }
     }
@@ -175,9 +184,13 @@ final class ParentZoneViewModel: ObservableObject {
         Task {
             await environment.relayDirectory.removeRelay(url)
             await environment.syncCoordinator.refreshRelays()
-            let endpoints = await environment.relayDirectory.allEndpoints()
+            async let endpointsTask = environment.relayDirectory.allEndpoints()
+            async let statusesTask = environment.syncCoordinator.relayStatuses()
+            let endpoints = await endpointsTask
+            let statuses = await statusesTask
             await MainActor.run {
                 self.relayEndpoints = endpoints
+                self.relayStatuses = statuses
             }
         }
     }
@@ -193,9 +206,13 @@ final class ParentZoneViewModel: ObservableObject {
         Task {
             await environment.relayDirectory.addRelay(url)
             await environment.syncCoordinator.refreshRelays()
-            let endpoints = await environment.relayDirectory.allEndpoints()
+            async let endpointsTask = environment.relayDirectory.allEndpoints()
+            async let statusesTask = environment.syncCoordinator.relayStatuses()
+            let endpoints = await endpointsTask
+            let statuses = await statusesTask
             await MainActor.run {
                 self.relayEndpoints = endpoints
+                self.relayStatuses = statuses
             }
         }
     }
@@ -203,10 +220,20 @@ final class ParentZoneViewModel: ObservableObject {
     func refreshRelays() {
         Task {
             await environment.syncCoordinator.refreshRelays()
-            let endpoints = await environment.relayDirectory.allEndpoints()
+            async let endpointsTask = environment.relayDirectory.allEndpoints()
+            async let statusesTask = environment.syncCoordinator.relayStatuses()
+            let endpoints = await endpointsTask
+            let statuses = await statusesTask
             await MainActor.run {
                 self.relayEndpoints = endpoints
+                self.relayStatuses = statuses
             }
+        }
+    }
+
+    func status(for endpoint: RelayDirectory.Endpoint) -> RelayHealth? {
+        relayStatuses.first {
+            $0.url.absoluteString.caseInsensitiveCompare(endpoint.urlString) == .orderedSame
         }
     }
 

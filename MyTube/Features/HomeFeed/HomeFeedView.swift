@@ -20,6 +20,7 @@ struct HomeFeedView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 32) {
                     heroSection
+                    sharedSection
                     shelvesSection
                 }
                 .padding(.horizontal, 24)
@@ -51,6 +52,14 @@ struct HomeFeedView: View {
                 }
             } else {
                 EmptyStateView()
+            }
+        }
+    }
+
+    private var sharedSection: some View {
+        Group {
+            if !viewModel.sharedVideos.isEmpty {
+                SharedShelfView(videos: viewModel.sharedVideos)
             }
         }
     }
@@ -231,6 +240,107 @@ private struct VideoCard: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct SharedShelfView: View {
+    let videos: [RemoteVideoModel]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Shared With You")
+                .font(.title2.bold())
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 16) {
+                    ForEach(videos) { video in
+                        RemoteVideoCard(video: video)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+}
+
+private struct RemoteVideoCard: View, Identifiable {
+    let video: RemoteVideoModel
+
+    var id: String { video.id }
+
+    private var formattedDuration: String {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = video.duration >= 3600 ? [.hour, .minute, .second] : [.minute, .second]
+        formatter.unitsStyle = .positional
+        formatter.zeroFormattingBehavior = .pad
+        return formatter.string(from: video.duration) ?? "--:--"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.orange.opacity(0.18))
+                .overlay(
+                    VStack(alignment: .leading, spacing: 8) {
+                        Image(systemName: "cloud.fill")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.orange)
+                        Text(video.title)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                        Text("From \(video.ownerChild)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 12) {
+                            Label(formattedDuration, systemImage: "clock")
+                            Label {
+                                Text(video.createdAt, style: .date)
+                            } icon: {
+                                Image(systemName: "calendar")
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Spacer()
+                        Label("Status: \(video.status.capitalized)", systemImage: statusIcon)
+                            .font(.caption)
+                            .foregroundStyle(statusColor)
+                    }
+                    .padding(16)
+                )
+                .frame(width: 240, height: 180)
+
+            Text("Open Parent Zone to approve & download.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 240, alignment: .leading)
+        }
+    }
+
+    private var statusIcon: String {
+        switch video.status {
+        case "available":
+            return "checkmark.seal.fill"
+        case "revoked":
+            return "exclamationmark.triangle.fill"
+        case "deleted":
+            return "trash.fill"
+        default:
+            return "info.circle.fill"
+        }
+    }
+
+    private var statusColor: Color {
+        switch video.status {
+        case "available":
+            return .green
+        case "revoked":
+            return .orange
+        case "deleted":
+            return .red
+        default:
+            return .secondary
+        }
     }
 }
 

@@ -12,6 +12,7 @@ final class AppEnvironment: ObservableObject {
     let persistence: PersistenceController
     let storagePaths: StoragePaths
     let videoLibrary: VideoLibrary
+    let remoteVideoStore: RemoteVideoStore
     let profileStore: ProfileStore
     let thumbnailer: Thumbnailer
     let editRenderer: EditRenderer
@@ -36,6 +37,7 @@ final class AppEnvironment: ObservableObject {
         persistence: PersistenceController,
         storagePaths: StoragePaths,
         videoLibrary: VideoLibrary,
+        remoteVideoStore: RemoteVideoStore,
         profileStore: ProfileStore,
         thumbnailer: Thumbnailer,
         editRenderer: EditRenderer,
@@ -53,6 +55,7 @@ final class AppEnvironment: ObservableObject {
         self.persistence = persistence
         self.storagePaths = storagePaths
         self.videoLibrary = videoLibrary
+        self.remoteVideoStore = remoteVideoStore
         self.profileStore = profileStore
         self.thumbnailer = thumbnailer
         self.editRenderer = editRenderer
@@ -79,6 +82,7 @@ final class AppEnvironment: ObservableObject {
             storagePaths = try! StoragePaths(baseURL: tempURL)
         }
         let videoLibrary = VideoLibrary(persistence: persistence, storagePaths: storagePaths)
+        let remoteVideoStore = RemoteVideoStore(persistence: persistence)
         let profileStore = ProfileStore(persistence: persistence)
         let thumbnailer = Thumbnailer(storagePaths: storagePaths)
         let editRenderer = EditRenderer(storagePaths: storagePaths)
@@ -92,7 +96,9 @@ final class AppEnvironment: ObservableObject {
         let syncCoordinator = SyncCoordinator(
             persistence: persistence,
             nostrClient: nostrClient,
-            relayDirectory: relayDirectory
+            relayDirectory: relayDirectory,
+            keyStore: keyStore,
+            cryptoService: cryptoService
         )
 
         let activeProfile: ProfileModel
@@ -115,6 +121,7 @@ final class AppEnvironment: ObservableObject {
             persistence: persistence,
             storagePaths: storagePaths,
             videoLibrary: videoLibrary,
+            remoteVideoStore: remoteVideoStore,
             profileStore: profileStore,
             thumbnailer: thumbnailer,
             editRenderer: editRenderer,
