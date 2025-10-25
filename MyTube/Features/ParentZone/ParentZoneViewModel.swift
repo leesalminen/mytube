@@ -17,6 +17,8 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var videos: [VideoModel] = []
     @Published var storageUsage: StorageUsage = .empty
     @Published var calmModeEnabled: Bool
+    @Published var relayEndpoints: [RelayDirectory.Endpoint] = []
+    @Published var newRelayURL: String = ""
 
     private let environment: AppEnvironment
     private let parentAuth: ParentAuth
@@ -119,6 +121,7 @@ final class ParentZoneViewModel: ObservableObject {
         errorMessage = nil
         refreshVideos()
         storageBreakdown()
+        loadRelays()
     }
 
     private func updateCache(with video: VideoModel) {
@@ -142,6 +145,69 @@ final class ParentZoneViewModel: ObservableObject {
             }
         }
         return total
+    }
+
+    func loadRelays() {
+        Task {
+            let endpoints = await environment.relayDirectory.allEndpoints()
+            await MainActor.run {
+                self.relayEndpoints = endpoints
+            }
+        }
+    }
+
+    func setRelay(id: String, enabled: Bool) {
+        guard let endpoint = relayEndpoints.first(where: { $0.id == id }), let url = endpoint.url else { return }
+
+        Task {
+            await environment.relayDirectory.setRelay(url, enabled: enabled)
+            await environment.syncCoordinator.refreshRelays()
+            let endpoints = await environment.relayDirectory.allEndpoints()
+            await MainActor.run {
+                self.relayEndpoints = endpoints
+            }
+        }
+    }
+
+    func removeRelay(id: String) {
+        guard let endpoint = relayEndpoints.first(where: { $0.id == id }), let url = endpoint.url else { return }
+
+        Task {
+            await environment.relayDirectory.removeRelay(url)
+            await environment.syncCoordinator.refreshRelays()
+            let endpoints = await environment.relayDirectory.allEndpoints()
+            await MainActor.run {
+                self.relayEndpoints = endpoints
+            }
+        }
+    }
+
+    func addRelay() {
+        let trimmed = newRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed), ["ws", "wss"].contains(url.scheme?.lowercased() ?? "") else {
+            errorMessage = "Please enter a valid wss:// relay URL."
+            return
+        }
+
+        newRelayURL = ""
+        Task {
+            await environment.relayDirectory.addRelay(url)
+            await environment.syncCoordinator.refreshRelays()
+            let endpoints = await environment.relayDirectory.allEndpoints()
+            await MainActor.run {
+                self.relayEndpoints = endpoints
+            }
+        }
+    }
+
+    func refreshRelays() {
+        Task {
+            await environment.syncCoordinator.refreshRelays()
+            let endpoints = await environment.relayDirectory.allEndpoints()
+            await MainActor.run {
+                self.relayEndpoints = endpoints
+            }
+        }
     }
 
     struct StorageUsage {

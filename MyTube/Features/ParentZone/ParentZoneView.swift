@@ -56,6 +56,56 @@ struct ParentZoneView: View {
                 }
             }
 
+            Section("Relays") {
+                if viewModel.relayEndpoints.isEmpty {
+                    Text("Using default public relays.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(viewModel.relayEndpoints) { endpoint in
+                        HStack {
+                            Toggle(isOn: Binding(
+                                get: {
+                                    viewModel.relayEndpoints.first(where: { $0.id == endpoint.id })?.isEnabled ?? false
+                                },
+                                set: { viewModel.setRelay(id: endpoint.id, enabled: $0) }
+                            )) {
+                                Text(endpoint.urlString)
+                                    .font(.subheadline)
+                                    .textSelection(.enabled)
+                            }
+                            .toggleStyle(.switch)
+
+                            Button(role: .destructive) {
+                                viewModel.removeRelay(id: endpoint.id)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("Remove relay")
+                        }
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("wss://relay.example.com", text: $viewModel.newRelayURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .disableAutocorrection(true)
+
+                    HStack {
+                        Button("Add Relay") {
+                            viewModel.addRelay()
+                        }
+                        Button("Reconnect") {
+                            viewModel.refreshRelays()
+                        }
+                    }
+                    .font(.footnote)
+                }
+                .padding(.vertical, 4)
+            }
+
             Section("Library") {
                 if viewModel.videos.isEmpty {
                     Text("No videos yet.")

@@ -17,6 +17,11 @@ final class AppEnvironment: ObservableObject {
     let editRenderer: EditRenderer
     let parentAuth: ParentAuth
     let rankingEngine: RankingEngine
+    let keyStore: KeychainKeyStore
+    let cryptoService: CryptoEnvelopeService
+    let nostrClient: NostrClient
+    let relayDirectory: RelayDirectory
+    let syncCoordinator: SyncCoordinator
 
     @Published var calmModeEnabled: Bool
 
@@ -36,6 +41,11 @@ final class AppEnvironment: ObservableObject {
         editRenderer: EditRenderer,
         parentAuth: ParentAuth,
         rankingEngine: RankingEngine,
+        keyStore: KeychainKeyStore,
+        cryptoService: CryptoEnvelopeService,
+        nostrClient: NostrClient,
+        relayDirectory: RelayDirectory,
+        syncCoordinator: SyncCoordinator,
         activeProfile: ProfileModel,
         calmModeEnabled: Bool,
         userDefaults: UserDefaults
@@ -48,6 +58,11 @@ final class AppEnvironment: ObservableObject {
         self.editRenderer = editRenderer
         self.parentAuth = parentAuth
         self.rankingEngine = rankingEngine
+        self.keyStore = keyStore
+        self.cryptoService = cryptoService
+        self.nostrClient = nostrClient
+        self.relayDirectory = relayDirectory
+        self.syncCoordinator = syncCoordinator
         self.activeProfile = activeProfile
         self.calmModeEnabled = calmModeEnabled
         self.userDefaults = userDefaults
@@ -69,7 +84,16 @@ final class AppEnvironment: ObservableObject {
         let editRenderer = EditRenderer(storagePaths: storagePaths)
         let parentAuth = ParentAuth()
         let rankingEngine = RankingEngine()
+        let keyStore = KeychainKeyStore()
+        let cryptoService = CryptoEnvelopeService()
+        let nostrClient = URLSessionNostrClient()
         let defaults = UserDefaults.standard
+        let relayDirectory = RelayDirectory(userDefaults: defaults)
+        let syncCoordinator = SyncCoordinator(
+            persistence: persistence,
+            nostrClient: nostrClient,
+            relayDirectory: relayDirectory
+        )
 
         let activeProfile: ProfileModel
         if let existing = try? profileStore.fetchProfiles().first {
@@ -87,7 +111,7 @@ final class AppEnvironment: ObservableObject {
             )
         }
 
-        return AppEnvironment(
+        let environment = AppEnvironment(
             persistence: persistence,
             storagePaths: storagePaths,
             videoLibrary: videoLibrary,
@@ -96,10 +120,21 @@ final class AppEnvironment: ObservableObject {
             editRenderer: editRenderer,
             parentAuth: parentAuth,
             rankingEngine: rankingEngine,
+            keyStore: keyStore,
+            cryptoService: cryptoService,
+            nostrClient: nostrClient,
+            relayDirectory: relayDirectory,
+            syncCoordinator: syncCoordinator,
             activeProfile: activeProfile,
             calmModeEnabled: defaults.bool(forKey: "calmModeEnabled"),
             userDefaults: defaults
         )
+
+        Task {
+            await syncCoordinator.start()
+        }
+
+        return environment
     }
 
     func switchProfile(_ profile: ProfileModel) {

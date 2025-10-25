@@ -17,6 +17,36 @@
         <attribute name="profileId" optional="NO" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="topicSuccessJSON" optional="NO" attributeType="String" defaultValueString="{}"/>
     </entity>
+    <entity name="FamilyLink" representedClassName="FamilyLinkEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="pairIdentifier" optional="NO" attributeType="String"/>
+        <attribute name="status" optional="NO" attributeType="String" defaultValueString="pending"/>
+        <attribute name="updatedAt" optional="NO" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="metadataJSON" optional="NO" attributeType="String" defaultValueString="{}"/>
+    </entity>
+    <entity name="Follow" representedClassName="FollowEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="followerChild" optional="NO" attributeType="String"/>
+        <attribute name="targetChild" optional="NO" attributeType="String"/>
+        <attribute name="status" optional="NO" attributeType="String" defaultValueString="pending"/>
+        <attribute name="approvedFrom" optional="NO" attributeType="Boolean" defaultValueString="NO"/>
+        <attribute name="approvedTo" optional="NO" attributeType="Boolean" defaultValueString="NO"/>
+        <attribute name="updatedAt" optional="NO" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="metadataJSON" optional="NO" attributeType="String" defaultValueString="{}"/>
+    </entity>
+    <entity name="RemoteVideo" representedClassName="RemoteVideoEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="videoId" optional="NO" attributeType="String"/>
+        <attribute name="ownerChild" optional="NO" attributeType="String"/>
+        <attribute name="title" optional="NO" attributeType="String" defaultValueString="Untitled"/>
+        <attribute name="duration" optional="NO" attributeType="Double" defaultValueString="0.0"/>
+        <attribute name="createdAt" optional="NO" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="blobURL" optional="NO" attributeType="String"/>
+        <attribute name="thumbURL" optional="NO" attributeType="String"/>
+        <attribute name="wrappedKeyJSON" optional="NO" attributeType="String" defaultValueString="{}"/>
+        <attribute name="visibility" optional="NO" attributeType="String" defaultValueString="followers"/>
+        <attribute name="expiresAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="status" optional="NO" attributeType="String" defaultValueString="available"/>
+        <attribute name="lastSyncedAt" optional="NO" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="metadataJSON" optional="NO" attributeType="String" defaultValueString="{}"/>
+    </entity>
     <entity name="Video" representedClassName="VideoEntity" syncable="YES" codeGenerationType="class">
         <attribute name="completionRate" optional="NO" attributeType="Double" defaultValueString="0.0"/>
         <attribute name="createdAt" optional="NO" attributeType="Date" usesScalarValueType="NO"/>
@@ -41,5 +71,8 @@
         <element name="Video" positionX="124" positionY="-18" width="128" height="254"/>
         <element name="Feedback" positionX="337" positionY="-18" width="128" height="134"/>
         <element name="RankingState" positionX="-63" positionY="206" width="128" height="104"/>
+        <element name="FamilyLink" positionX="124" positionY="206" width="128" height="119"/>
+        <element name="Follow" positionX="337" positionY="206" width="128" height="164"/>
+        <element name="RemoteVideo" positionX="550" positionY="-18" width="160" height="239"/>
     </elements>
 </model>
