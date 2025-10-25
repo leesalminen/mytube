@@ -9,12 +9,13 @@ import SwiftUI
 
 @main
 struct MyTubeApp: App {
-    let persistenceController = PersistenceController.shared
+    @StateObject private var environment = AppEnvironment.live()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(\.managedObjectContext, persistenceController.container.viewContext)
+            AppRootView()
+                .environmentObject(environment)
+                .environment(\.managedObjectContext, environment.persistence.viewContext)
         }
     }
 }
