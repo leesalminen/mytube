@@ -307,6 +307,7 @@ final class ParentZoneViewModelTests: XCTestCase {
         let identityManager = IdentityManager(keyStore: keyStore, profileStore: profileStore)
         let parentProfileStore = ParentProfileStore(persistence: persistence)
         let childProfileStore = ChildProfileStore(persistence: persistence)
+        let remotePlaybackStore = RemotePlaybackStore(persistence: persistence)
         let likeStore = LikeStore(
             persistenceController: persistence,
             childProfileStore: childProfileStore
@@ -444,6 +445,7 @@ final class ParentZoneViewModelTests: XCTestCase {
             videoLibrary: videoLibrary,
             remoteVideoStore: remoteVideoStore,
             remoteVideoDownloader: remoteVideoDownloader,
+            remotePlaybackStore: remotePlaybackStore,
             profileStore: profileStore,
             thumbnailer: thumbnailer,
             editRenderer: editRenderer,

@@ -15,6 +15,7 @@ final class AppEnvironment: ObservableObject {
     let videoLibrary: VideoLibrary
     let remoteVideoStore: RemoteVideoStore
     let remoteVideoDownloader: RemoteVideoDownloader
+    let remotePlaybackStore: RemotePlaybackStore
     let profileStore: ProfileStore
     let thumbnailer: Thumbnailer
     let editRenderer: EditRenderer
@@ -65,6 +66,7 @@ final class AppEnvironment: ObservableObject {
         videoLibrary: VideoLibrary,
         remoteVideoStore: RemoteVideoStore,
         remoteVideoDownloader: RemoteVideoDownloader,
+        remotePlaybackStore: RemotePlaybackStore,
         profileStore: ProfileStore,
         thumbnailer: Thumbnailer,
         editRenderer: EditRenderer,
@@ -106,6 +108,7 @@ final class AppEnvironment: ObservableObject {
         self.videoLibrary = videoLibrary
         self.remoteVideoStore = remoteVideoStore
         self.remoteVideoDownloader = remoteVideoDownloader
+        self.remotePlaybackStore = remotePlaybackStore
         self.profileStore = profileStore
         self.thumbnailer = thumbnailer
         self.editRenderer = editRenderer
@@ -167,6 +170,7 @@ enum StorageModeError: Error {
         }
         let videoLibrary = VideoLibrary(persistence: persistence, storagePaths: storagePaths)
         let remoteVideoStore = RemoteVideoStore(persistence: persistence)
+        let remotePlaybackStore = RemotePlaybackStore(persistence: persistence)
         let profileStore = ProfileStore(persistence: persistence)
         let thumbnailer = Thumbnailer(storagePaths: storagePaths)
         let editRenderer = EditRenderer(storagePaths: storagePaths)
@@ -324,6 +328,7 @@ enum StorageModeError: Error {
             videoLibrary: videoLibrary,
             remoteVideoStore: remoteVideoStore,
             remoteVideoDownloader: remoteVideoDownloader,
+            remotePlaybackStore: remotePlaybackStore,
             profileStore: profileStore,
             thumbnailer: thumbnailer,
             editRenderer: editRenderer,

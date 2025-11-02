@@ -90,9 +90,9 @@ struct RemoteVideoPlayerView: View {
 
                 PlaybackMetricRow(
                     accent: environment.activeProfile.theme.kidPalette.accent,
-                    plays: nil,
-                    completionRate: nil,
-                    replayRate: nil
+                    plays: viewModel.playbackRecord?.playCount ?? 0,
+                    completionRate: viewModel.playbackRecord?.completionRate ?? 0,
+                    replayRate: viewModel.playbackRecord?.replayRate ?? 0
                 )
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -171,6 +171,7 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published private(set) var likeCount: Int = 0
     @Published private(set) var likeRecords: [LikeRecord] = []
+    @Published private(set) var playbackRecord: RemotePlaybackRecord?
     @Published var likeError: String?
     @Published var playbackError: String?
     @Published var isReporting = false
@@ -180,12 +181,16 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
     let formattedDuration: String
 
     private let environment: AppEnvironment
+    private let remotePlaybackStore: RemotePlaybackStore
     private var viewerPublicKeyHex: String?
     private var viewerChildNpub: String?
     private var viewerDisplayName: String?
+    private var activeProfileId: UUID?
     private var timeObserver: Any?
+    private var completionObserver: Any?
     private var cancellables: Set<AnyCancellable> = []
     private var isDismissed = false
+    private var didCompletePlayback = false
 
     private var videoId: UUID? {
         UUID(uuidString: video.video.id)
@@ -194,9 +199,11 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
     init(video: HomeFeedViewModel.SharedRemoteVideo, environment: AppEnvironment) {
         self.video = video
         self.environment = environment
+        self.remotePlaybackStore = environment.remotePlaybackStore
         self.formattedDuration = RemoteVideoPlayerViewModel.makeDurationFormatter(duration: video.video.duration)
         setupBindings()
         refreshLikes()
+        refreshPlaybackMetrics()
     }
 
     func onAppear() {
@@ -204,11 +211,15 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
     }
 
     func onDisappear() {
+        if !isDismissed {
+            recordIfNeeded()
+        }
         guard !isDismissed else { return }
         cleanupPlayer()
     }
 
     func dismiss() {
+        recordIfNeeded()
         isDismissed = true
         reportSuccess = false
         cleanupPlayer()
@@ -220,6 +231,11 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
             player.pause()
             isPlaying = false
         } else {
+            if didCompletePlayback {
+                player.seek(to: .zero)
+                didCompletePlayback = false
+                progress = 0
+            }
             player.play()
             isPlaying = true
         }
@@ -331,6 +347,13 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        remotePlaybackStore.$records
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshPlaybackMetrics()
+            }
+            .store(in: &cancellables)
+
         updateViewerIdentity(for: environment.activeProfile)
     }
 
@@ -375,7 +398,9 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
             viewerChildNpub = nil
             viewerDisplayName = profile.name
         }
+        activeProfileId = profile.id
         refreshLikes()
+        refreshPlaybackMetrics()
     }
 
     private func preparePlayerIfNeeded() async {
@@ -394,8 +419,10 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
         let newPlayer = AVPlayer(url: mediaURL)
         player = newPlayer
         attachTimeObserver()
+        attachCompletionObserver(for: newPlayer)
         newPlayer.play()
         isPlaying = true
+        didCompletePlayback = false
     }
 
     private func attachTimeObserver() {
@@ -417,11 +444,41 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
         timeObserver = nil
     }
 
+    private func attachCompletionObserver(for player: AVPlayer) {
+        detachCompletionObserver()
+        guard let item = player.currentItem else { return }
+        completionObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleCompletion()
+        }
+    }
+
+    private func detachCompletionObserver() {
+        if let completionObserver {
+            NotificationCenter.default.removeObserver(completionObserver)
+        }
+        completionObserver = nil
+    }
+
+    private func handleCompletion() {
+        guard !didCompletePlayback else { return }
+        didCompletePlayback = true
+        progress = 1.0
+        isPlaying = false
+        recordPlayback(completed: true)
+    }
+
     private func cleanupPlayer() {
         detachTimeObserver()
+        detachCompletionObserver()
         player?.pause()
         player = nil
         isPlaying = false
+        progress = 0
+        didCompletePlayback = false
     }
 
     private static func makeDurationFormatter(duration: TimeInterval) -> String {
@@ -430,5 +487,35 @@ final class RemoteVideoPlayerViewModel: ObservableObject {
         formatter.unitsStyle = .positional
         formatter.zeroFormattingBehavior = .pad
         return formatter.string(from: duration) ?? "--:--"
+    }
+
+    private func recordIfNeeded() {
+        guard !didCompletePlayback else { return }
+        guard progress > 0 else { return }
+        recordPlayback(completed: false)
+    }
+
+    private func recordPlayback(completed: Bool) {
+        guard let profileId = activeProfileId else { return }
+        let progressValue = completed ? 1.0 : max(0.0, min(1.0, progress))
+        Task {
+            let record = await remotePlaybackStore.record(
+                videoId: video.video.id,
+                profileId: profileId,
+                progress: progressValue,
+                completed: completed
+            )
+            await MainActor.run {
+                self.playbackRecord = record
+            }
+        }
+    }
+
+    private func refreshPlaybackMetrics() {
+        guard let profileId = activeProfileId else {
+            playbackRecord = nil
+            return
+        }
+        playbackRecord = remotePlaybackStore.metrics(for: video.video.id, profileId: profileId)
     }
 }

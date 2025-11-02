@@ -45,6 +45,15 @@
         <attribute name="lastSyncedAt" optional="NO" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="metadataJSON" optional="NO" attributeType="String" defaultValueString="{}"/>
     </entity>
+    <entity name="RemotePlayback" representedClassName="RemotePlaybackEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="id" optional="NO" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="videoId" optional="NO" attributeType="String"/>
+        <attribute name="profileId" optional="NO" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="playCount" optional="NO" attributeType="Integer 16" defaultValueString="0"/>
+        <attribute name="completionRate" optional="NO" attributeType="Double" defaultValueString="0.0"/>
+        <attribute name="replayRate" optional="NO" attributeType="Double" defaultValueString="0.0"/>
+        <attribute name="lastPlayedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+    </entity>
     <entity name="ParentProfile" representedClassName="ParentProfileEntity" syncable="YES" codeGenerationType="class">
         <attribute name="publicKey" optional="NO" attributeType="String"/>
         <attribute name="name" optional="YES" attributeType="String"/>
@@ -112,6 +121,7 @@
         <element name="RankingState" positionX="-63" positionY="206" width="128" height="104"/>
         <element name="Follow" positionX="337" positionY="206" width="128" height="164"/>
         <element name="RemoteVideo" positionX="550" positionY="-18" width="160" height="239"/>
+        <element name="RemotePlayback" positionX="763" positionY="206" width="160" height="194"/>
         <element name="ParentProfile" positionX="763" positionY="-18" width="160" height="209"/>
         <element name="ChildProfile" positionX="976" positionY="-18" width="160" height="209"/>
         <element name="Like" positionX="124" positionY="306" width="128" height="149"/>
