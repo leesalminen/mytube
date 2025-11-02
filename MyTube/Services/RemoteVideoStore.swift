@@ -16,6 +16,8 @@ struct RemoteVideoModel: Identifiable, Sendable {
         case failed
         case revoked
         case deleted
+        case blocked
+        case reported
     }
 
     struct CryptoEnvelope: Decodable, Sendable {
@@ -148,6 +150,17 @@ final class RemoteVideoStore {
         return try fetch(with: request)
     }
 
+    func fetchVideo(videoId: String) throws -> RemoteVideoModel? {
+        let request = RemoteVideoEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "videoId == %@", videoId)
+        request.fetchLimit = 1
+        let context = persistence.viewContext
+        guard let entity = try context.fetch(request).first else {
+            return nil
+        }
+        return RemoteVideoModel(entity: entity)
+    }
+
     func updateStatus(videoId: String, status: String) throws -> RemoteVideoModel? {
         let context = persistence.newBackgroundContext()
         var model: RemoteVideoModel?
@@ -165,6 +178,56 @@ final class RemoteVideoStore {
 
                 entity.status = status
                 entity.lastSyncedAt = Date()
+                try context.save()
+
+                model = RemoteVideoModel(entity: entity)
+            } catch {
+                thrownError = error
+            }
+        }
+
+        if let error = thrownError {
+            throw error
+        }
+        return model
+    }
+
+    func markVideoAsBlocked(
+        videoId: String,
+        reason: String?,
+        storagePaths: StoragePaths,
+        timestamp: Date = Date()
+    ) throws -> RemoteVideoModel? {
+        let context = persistence.newBackgroundContext()
+        var model: RemoteVideoModel?
+        var thrownError: Error?
+        let fileManager = FileManager.default
+
+        context.performAndWait {
+            do {
+                let request = RemoteVideoEntity.fetchRequest()
+                request.predicate = NSPredicate(format: "videoId == %@", videoId)
+                request.fetchLimit = 1
+
+                guard let entity = try context.fetch(request).first else {
+                    return
+                }
+
+                if let mediaPath = entity.localMediaPath {
+                    let fileURL = storagePaths.rootURL.appendingPathComponent(mediaPath)
+                    try? fileManager.removeItem(at: fileURL)
+                }
+                if let thumbPath = entity.localThumbPath {
+                    let fileURL = storagePaths.rootURL.appendingPathComponent(thumbPath)
+                    try? fileManager.removeItem(at: fileURL)
+                }
+
+                entity.localMediaPath = nil
+                entity.localThumbPath = nil
+                entity.lastDownloadedAt = nil
+                entity.status = Status.blocked.rawValue
+                entity.downloadError = reason
+                entity.lastSyncedAt = timestamp
                 try context.save()
 
                 model = RemoteVideoModel(entity: entity)

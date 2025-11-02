@@ -38,7 +38,12 @@ actor SyncCoordinator {
         cryptoService: CryptoEnvelopeService,
         relationshipStore: RelationshipStore,
         parentProfileStore: ParentProfileStore,
-        childProfileStore: ChildProfileStore
+        childProfileStore: ChildProfileStore,
+        likeStore: LikeStore,
+        reportStore: ReportStore,
+        remoteVideoStore: RemoteVideoStore,
+        videoLibrary: VideoLibrary,
+        storagePaths: StoragePaths
     ) {
         self.nostrClient = nostrClient
         self.relayDirectory = relayDirectory
@@ -53,7 +58,12 @@ actor SyncCoordinator {
                 cryptoService: cryptoService,
                 relationshipStore: relationshipStore,
                 parentProfileStore: parentProfileStore,
-                childProfileStore: childProfileStore
+                childProfileStore: childProfileStore,
+                likeStore: likeStore,
+                reportStore: reportStore,
+                remoteVideoStore: remoteVideoStore,
+                videoLibrary: videoLibrary,
+                storagePaths: storagePaths
             )
         )
     }

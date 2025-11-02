@@ -7,6 +7,7 @@ MyTube is organized as an iPad-first SwiftUI app. Source lives in `MyTube/` with
 - **Always target** `iPad mini (A17 Pro)` for simulator work:
   - `xcodebuild -scheme MyTube -destination 'platform=iOS Simulator,name=iPad mini (A17 Pro)' build`
   - `xcodebuild test -scheme MyTube -destination 'platform=iOS Simulator,name=iPad mini (A17 Pro)'`
+- Remote builds or tooling can run via `ssh lee@100.79.255.36`; the usual build commands are available there.
 - `swift run swiftlint` (optional): verify linting before submitting changes.
 - `xcrun simctl addmedia booted path/to/video.mp4`: preload sample videos for local testing.
 

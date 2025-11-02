@@ -75,9 +75,6 @@ private struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(appEnvironment.activeProfile.name)
                         .font(.headline)
-                    Text("Theme: \(appEnvironment.activeProfile.theme.rawValue.capitalized)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
 
                     Picker(
                         "Theme",
@@ -94,11 +91,6 @@ private struct SidebarView: View {
                     }
                     .pickerStyle(.menu)
                 }
-                .padding(.vertical, 6)
-                .padding(.horizontal, 10)
-                .kidCardBackground()
-                .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
-                .listRowBackground(Color.clear)
             }
         }
         .navigationTitle("Tubestr")

@@ -211,40 +211,17 @@ private struct HeroCard: View {
             }
             .buttonStyle(.plain)
 
-            HStack(spacing: 24) {
-                ThemedMetricChip(label: "Plays", value: "\(video.playCount)", accent: appAccent)
-                ThemedMetricChip(label: "Completion", value: percentage(video.completionRate), accent: appAccent)
-                ThemedMetricChip(label: "Replay", value: percentage(video.replayRate), accent: appAccent)
-            }
+            PlaybackMetricRow(
+                accent: appAccent,
+                plays: video.playCount,
+                completionRate: video.completionRate,
+                replayRate: video.replayRate
+            )
         }
     }
 
     private func percentage(_ value: Double) -> String {
         String(format: "%.0f%%", min(max(value, 0.0), 1.0) * 100)
-    }
-}
-
-private struct ThemedMetricChip: View {
-    let label: String
-    let value: String
-    let accent: Color
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(label.uppercased())
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.9))
-            Text(value)
-                .font(.headline)
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(
-            Capsule(style: .continuous)
-                .fill(LinearGradient(colors: [accent, accent.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing))
-        )
-        .shadow(color: accent.opacity(0.2), radius: 6, y: 3)
     }
 }
 

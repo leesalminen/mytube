@@ -17,6 +17,11 @@ struct SyncReducerContext {
     let relationshipStore: RelationshipStore
     let parentProfileStore: ParentProfileStore
     let childProfileStore: ChildProfileStore
+    let likeStore: LikeStore
+    let reportStore: ReportStore
+    let remoteVideoStore: RemoteVideoStore
+    let videoLibrary: VideoLibrary
+    let storagePaths: StoragePaths
 }
 
 actor NostrEventReducer {
@@ -300,8 +305,12 @@ actor NostrEventReducer {
         case .videoDelete:
             let payload: VideoLifecycleMessage = try dmDecoder.decode(VideoLifecycleMessage.self, from: plaintext)
             try await reduceVideoDeleteDM(payload)
-        case .like, .report:
-            logger.info("Received \(kind.rawValue, privacy: .public) DM; handling deferred.")
+        case .like:
+            let payload = try dmDecoder.decode(LikeMessage.self, from: plaintext)
+            await reduceLikeDM(payload)
+        case .report:
+            let payload = try dmDecoder.decode(ReportMessage.self, from: plaintext)
+            await reduceReportDM(payload)
         }
     }
 
@@ -313,6 +322,110 @@ actor NostrEventReducer {
             return "{}"
         }
         return json
+    }
+
+    private func reduceLikeDM(_ message: LikeMessage) async {
+        await context.likeStore.processIncomingLike(message)
+    }
+
+    private func reduceReportDM(_ message: ReportMessage) async {
+        let timestamp = Date(timeIntervalSince1970: message.ts)
+        let reason = ReportReason(rawValue: message.reason) ?? .other
+        let reporterHex = canonicalKey(message.by)
+        let subjectHex = canonicalKey(message.subjectChild)
+        let localParentHex = localParentPublicKey()
+        let reporterIsLocal = reporterHex == localParentHex
+        let subjectIsLocalChild = localChildHexKeys().contains(subjectHex)
+
+        do {
+            let stored = try await MainActor.run {
+                try await self.context.reportStore.ingestReportMessage(
+                    message,
+                    isOutbound: reporterIsLocal,
+                    createdAt: timestamp,
+                    deliveredAt: reporterIsLocal ? timestamp : nil,
+                    defaultStatus: reporterIsLocal ? .acknowledged : .pending,
+                    action: nil
+                )
+            }
+
+            if reporterIsLocal {
+                await handleReporterSideEffects(for: message, reason: reason, timestamp: timestamp, stored: stored)
+            }
+
+            if subjectIsLocalChild {
+                await handleSubjectSideEffects(for: message, reason: reason, timestamp: timestamp, stored: stored)
+            }
+        } catch {
+            logger.error("Failed to persist report DM for video \(message.videoId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func handleReporterSideEffects(
+        for message: ReportMessage,
+        reason: ReportReason,
+        timestamp: Date,
+        stored: ReportModel
+    ) async {
+        do {
+            _ = try context.remoteVideoStore.markVideoAsBlocked(
+                videoId: message.videoId,
+                reason: reason.rawValue,
+                storagePaths: context.storagePaths,
+                timestamp: timestamp
+            )
+        } catch {
+            logger.error("Failed to mark reported video \(message.videoId, privacy: .public) as blocked: \(error.localizedDescription, privacy: .public)")
+        }
+
+        let action = stored.actionTaken == .none ? .reportOnly : stored.actionTaken
+        do {
+            try await MainActor.run {
+                try await self.context.reportStore.updateStatus(
+                    reportId: stored.id,
+                    status: .actioned,
+                    action: action,
+                    lastActionAt: timestamp
+                )
+            }
+        } catch {
+            logger.error("Failed updating report status after reporter side effects: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func handleSubjectSideEffects(
+        for message: ReportMessage,
+        reason: ReportReason,
+        timestamp: Date,
+        stored: ReportModel
+    ) async {
+        guard let uuid = UUID(uuidString: message.videoId) else {
+            logger.warning("Reported video id \(message.videoId, privacy: .public) is not a valid UUID; skipping local marking.")
+            return
+        }
+
+        do {
+            _ = try await context.videoLibrary.markVideoReported(
+                videoId: uuid,
+                reason: reason,
+                reportedAt: timestamp
+            )
+        } catch {
+            logger.error("Failed to mark local video \(message.videoId, privacy: .public) as reported: \(error.localizedDescription, privacy: .public)")
+        }
+
+        do {
+            try await MainActor.run {
+                try await self.context.reportStore.updateStatus(
+                    reportId: stored.id,
+                    status: .actioned,
+                    action: .deleted,
+                    lastActionAt: timestamp
+                )
+            }
+        } catch {
+            logger.error("Failed updating report status after subject side effects: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func encodeJSON<T: Encodable>(_ value: T) -> String {
@@ -479,6 +592,26 @@ actor NostrEventReducer {
             return data.hexEncodedString().lowercased()
         }
         return value.lowercased()
+    }
+
+    private func localParentPublicKey() -> String? {
+        guard let pair = try? context.keyStore.fetchKeyPair(role: .parent) else {
+            return nil
+        }
+        return pair.publicKeyHex.lowercased()
+    }
+
+    private func localChildHexKeys() -> Set<String> {
+        guard let identifiers = try? context.keyStore.childKeyIdentifiers() else {
+            return []
+        }
+        var keys: Set<String> = []
+        for identifier in identifiers {
+            if let pair = try? context.keyStore.fetchKeyPair(role: .child(id: identifier)) {
+                keys.insert(pair.publicKeyHex.lowercased())
+            }
+        }
+        return keys
     }
 
     private func performBackgroundTask(_ work: @escaping @Sendable (NSManagedObjectContext) throws -> Void) async throws {

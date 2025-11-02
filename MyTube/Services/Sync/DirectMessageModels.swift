@@ -281,14 +281,16 @@ struct ReportMessage: Codable, Sendable {
     let videoId: String
     let subjectChild: String
     let reason: String
+    let note: String?
     let by: String
     let ts: Double
 
-    init(videoId: String, subjectChild: String, reason: String, by: String, timestamp: Date) {
+    init(videoId: String, subjectChild: String, reason: String, note: String?, by: String, timestamp: Date) {
         self.t = DirectMessageKind.report.rawValue
         self.videoId = videoId
         self.subjectChild = subjectChild
         self.reason = reason
+        self.note = note
         self.by = by
         self.ts = timestamp.timeIntervalSince1970
     }
@@ -298,6 +300,7 @@ struct ReportMessage: Codable, Sendable {
         case videoId = "video_id"
         case subjectChild = "subject_child"
         case reason
+        case note
         case by
         case ts
     }

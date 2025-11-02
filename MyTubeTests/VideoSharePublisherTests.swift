@@ -161,7 +161,9 @@ final class VideoSharePublisherTests: XCTestCase {
             tags: [],
             cvLabels: [],
             faceCount: 0,
-            loudness: 0
+            loudness: 0,
+            reportedAt: nil,
+            reportReason: nil
         )
     }
 }

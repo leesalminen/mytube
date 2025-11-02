@@ -33,7 +33,9 @@ struct MyTubeTests {
                 tags: ["art"],
                 cvLabels: [],
                 faceCount: 1,
-                loudness: 0.3
+                loudness: 0.3,
+                reportedAt: nil,
+                reportReason: nil
             ),
             VideoModel(
                 id: UUID(),
@@ -52,7 +54,9 @@ struct MyTubeTests {
                 tags: ["music"],
                 cvLabels: [],
                 faceCount: 2,
-                loudness: 0.5
+                loudness: 0.5,
+                reportedAt: nil,
+                reportReason: nil
             )
         ]
 

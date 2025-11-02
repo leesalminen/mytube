@@ -145,6 +145,30 @@ final class VideoLibrary {
         )
     }
 
+    @discardableResult
+    func markVideoReported(
+        videoId: UUID,
+        reason: ReportReason,
+        reportedAt: Date = Date()
+    ) async throws -> VideoModel {
+        try await performBackground { [self] context in
+            guard let entity = try fetchVideo(in: context, id: videoId) else {
+                throw VideoLibraryError.entityMissing
+            }
+
+            entity.reportedAt = reportedAt
+            entity.reportReason = reason.rawValue
+            entity.hidden = true
+
+            try context.save()
+
+            guard let model = VideoModel(entity: entity) else {
+                throw VideoLibraryError.entityMissing
+            }
+            return model
+        }
+    }
+
     func deleteVideo(videoId: UUID) async throws {
         try await performBackground { [self] context in
             guard let entity = try fetchVideo(in: context, id: videoId) else {

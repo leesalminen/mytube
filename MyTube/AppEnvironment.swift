@@ -31,13 +31,18 @@ final class AppEnvironment: ObservableObject {
     let relayDirectory: RelayDirectory
     let syncCoordinator: SyncCoordinator
     let directMessageOutbox: DirectMessageOutbox
+    let likeStore: LikeStore
+    let likePublisher: LikePublisher
     let storageRouter: StorageRouter
     let videoSharePublisher: VideoSharePublisher
     let videoShareCoordinator: VideoShareCoordinator
     let relationshipStore: RelationshipStore
     let followCoordinator: FollowCoordinator
+    let reportStore: ReportStore
+    let reportCoordinator: ReportCoordinator
     let backendClient: BackendClient
     let storageConfigurationStore: StorageConfigurationStore
+    let safetyConfigurationStore: SafetyConfigurationStore
     private let managedStorageClient: ManagedStorageClient
     private var byoStorageClient: MinIOClient?
     private var backendBaseURL: URL
@@ -76,13 +81,18 @@ final class AppEnvironment: ObservableObject {
         relayDirectory: RelayDirectory,
         syncCoordinator: SyncCoordinator,
         directMessageOutbox: DirectMessageOutbox,
+        likeStore: LikeStore,
+        likePublisher: LikePublisher,
         storageRouter: StorageRouter,
         videoSharePublisher: VideoSharePublisher,
         videoShareCoordinator: VideoShareCoordinator,
         relationshipStore: RelationshipStore,
         followCoordinator: FollowCoordinator,
+        reportStore: ReportStore,
+        reportCoordinator: ReportCoordinator,
         backendClient: BackendClient,
         storageConfigurationStore: StorageConfigurationStore,
+        safetyConfigurationStore: SafetyConfigurationStore,
         managedStorageClient: ManagedStorageClient,
         byoStorageClient: MinIOClient?,
         backendBaseURL: URL,
@@ -112,13 +122,18 @@ final class AppEnvironment: ObservableObject {
         self.relayDirectory = relayDirectory
         self.syncCoordinator = syncCoordinator
         self.directMessageOutbox = directMessageOutbox
+        self.likeStore = likeStore
+        self.likePublisher = likePublisher
         self.storageRouter = storageRouter
         self.videoSharePublisher = videoSharePublisher
         self.videoShareCoordinator = videoShareCoordinator
         self.relationshipStore = relationshipStore
         self.followCoordinator = followCoordinator
+        self.reportStore = reportStore
+        self.reportCoordinator = reportCoordinator
         self.backendClient = backendClient
         self.storageConfigurationStore = storageConfigurationStore
+        self.safetyConfigurationStore = safetyConfigurationStore
         self.managedStorageClient = managedStorageClient
         self.byoStorageClient = byoStorageClient
         self.backendBaseURL = backendBaseURL
@@ -165,7 +180,12 @@ enum StorageModeError: Error {
         let nostrClient = RelayPoolNostrClient()
         let defaults = UserDefaults.standard
         let relayDirectory = RelayDirectory(userDefaults: defaults)
+        let likeStore = LikeStore(
+            persistenceController: persistence,
+            childProfileStore: childProfileStore
+        )
         let relationshipStore = RelationshipStore(persistence: persistence)
+        let reportStore = ReportStore(persistence: persistence)
         let parentProfilePublisher = ParentProfilePublisher(
             identityManager: identityManager,
             parentProfileStore: parentProfileStore,
@@ -186,13 +206,24 @@ enum StorageModeError: Error {
             cryptoService: cryptoService,
             relationshipStore: relationshipStore,
             parentProfileStore: parentProfileStore,
-            childProfileStore: childProfileStore
+            childProfileStore: childProfileStore,
+            likeStore: likeStore,
+            reportStore: reportStore,
+            remoteVideoStore: remoteVideoStore,
+            videoLibrary: videoLibrary,
+            storagePaths: storagePaths
         )
         let directMessageOutbox = DirectMessageOutbox(
             keyStore: keyStore,
             cryptoService: cryptoService,
             nostrClient: nostrClient,
             relayDirectory: relayDirectory
+        )
+        let likePublisher = LikePublisher(
+            directMessageOutbox: directMessageOutbox,
+            keyStore: keyStore,
+            childProfileStore: childProfileStore,
+            remoteVideoStore: remoteVideoStore
         )
         let legacyDefault = "http://127.0.0.1:8080"
         let managedDefault = "https://auth.tubestr.app"
@@ -213,6 +244,7 @@ enum StorageModeError: Error {
         let backendClient = BackendClient(baseURL: backendBaseURL, keyStore: keyStore)
         let storageConfigurationStore = StorageConfigurationStore(userDefaults: defaults)
         let managedStorageClient = ManagedStorageClient(backend: backendClient)
+        let safetyConfigurationStore = SafetyConfigurationStore(userDefaults: defaults)
 
         var storageMode = storageConfigurationStore.currentMode()
         var byoStorageClient: MinIOClient?
@@ -269,6 +301,18 @@ enum StorageModeError: Error {
             nostrClient: nostrClient,
             relayDirectory: relayDirectory
         )
+        let reportCoordinator = ReportCoordinator(
+            reportStore: reportStore,
+            remoteVideoStore: remoteVideoStore,
+            videoLibrary: videoLibrary,
+            directMessageOutbox: directMessageOutbox,
+            keyStore: keyStore,
+            backendClient: backendClient,
+            safetyStore: safetyConfigurationStore,
+            storagePaths: storagePaths,
+            relationshipStore: relationshipStore,
+            followCoordinator: followCoordinator
+        )
 
         let activeProfile = (try? profileStore.fetchProfiles().first) ?? ProfileModel.placeholder()
 
@@ -296,13 +340,18 @@ enum StorageModeError: Error {
             relayDirectory: relayDirectory,
             syncCoordinator: syncCoordinator,
             directMessageOutbox: directMessageOutbox,
+            likeStore: likeStore,
+            likePublisher: likePublisher,
             storageRouter: storageRouter,
             videoSharePublisher: videoSharePublisher,
             videoShareCoordinator: videoShareCoordinator,
             relationshipStore: relationshipStore,
             followCoordinator: followCoordinator,
+            reportStore: reportStore,
+            reportCoordinator: reportCoordinator,
             backendClient: backendClient,
             storageConfigurationStore: storageConfigurationStore,
+            safetyConfigurationStore: safetyConfigurationStore,
             managedStorageClient: managedStorageClient,
             byoStorageClient: byoStorageClient,
             backendBaseURL: backendBaseURL,

@@ -92,6 +92,30 @@ struct PresignDownloadResponse: Decodable {
     }
 }
 
+struct ModeratorKeyResponse: Decodable {
+    let publicKey: String
+
+    private enum CodingKeys: String, CodingKey {
+        case npub
+        case publicKey = "public_key"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let value = try container.decodeIfPresent(String.self, forKey: .npub) {
+            self.publicKey = value
+        } else if let value = try container.decodeIfPresent(String.self, forKey: .publicKey) {
+            self.publicKey = value
+        } else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .publicKey,
+                in: container,
+                debugDescription: "Expected moderator key under npub/public_key"
+            )
+        }
+    }
+}
+
 struct EntitlementResponse: Decodable {
     let plan: String
     let status: String
@@ -297,6 +321,16 @@ actor BackendClient {
             path: "presign/download",
             body: body
         )
+    }
+
+    func fetchModeratorKey() async throws -> String {
+        let response: ModeratorKeyResponse = try await authorizedJSONRequest(
+            method: .get,
+            path: "safety/moderator-key",
+            body: nil
+        )
+        logger.debug("Fetched moderator key \(response.publicKey.prefix(12), privacy: .public)…")
+        return response.publicKey
     }
 
     private func authorizedJSONRequest<Response: Decodable>(

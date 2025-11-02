@@ -105,7 +105,9 @@ final class ParentZoneViewModelTests: XCTestCase {
             tags: [],
             cvLabels: [],
             faceCount: 0,
-            loudness: 0.1
+            loudness: 0.1,
+            reportedAt: nil,
+            reportReason: nil
         )
 
         let remoteParentHex = String(repeating: "d", count: 64)
@@ -305,6 +307,10 @@ final class ParentZoneViewModelTests: XCTestCase {
         let identityManager = IdentityManager(keyStore: keyStore, profileStore: profileStore)
         let parentProfileStore = ParentProfileStore(persistence: persistence)
         let childProfileStore = ChildProfileStore(persistence: persistence)
+        let likeStore = LikeStore(
+            persistenceController: persistence,
+            childProfileStore: childProfileStore
+        )
         let cryptoService = CryptoEnvelopeService()
         let nostrClient = StubNostrClient()
         let userDefaults = UserDefaults(suiteName: "ParentZoneViewModelTests.Settings")!
@@ -323,6 +329,7 @@ final class ParentZoneViewModelTests: XCTestCase {
             relayDirectory: relayDirectory
         )
         let relationshipStore = RelationshipStore(persistence: persistence)
+        let reportStore = ReportStore(persistence: persistence)
         let syncCoordinator = SyncCoordinator(
             persistence: persistence,
             nostrClient: nostrClient,
@@ -331,7 +338,12 @@ final class ParentZoneViewModelTests: XCTestCase {
             cryptoService: cryptoService,
             relationshipStore: relationshipStore,
             parentProfileStore: parentProfileStore,
-            childProfileStore: childProfileStore
+            childProfileStore: childProfileStore,
+            likeStore: likeStore,
+            reportStore: reportStore,
+            remoteVideoStore: remoteVideoStore,
+            videoLibrary: videoLibrary,
+            storagePaths: storagePaths
         )
 
         let directMessageOutbox = DirectMessageOutbox(
@@ -340,6 +352,12 @@ final class ParentZoneViewModelTests: XCTestCase {
             nostrClient: nostrClient,
             relayDirectory: relayDirectory
         )
+        let likePublisher = LikePublisher(
+            directMessageOutbox: directMessageOutbox,
+            keyStore: keyStore,
+            childProfileStore: childProfileStore,
+            remoteVideoStore: remoteVideoStore
+        )
 
         let backendClient = BackendClient(
             baseURL: URL(string: "https://example.com")!,
@@ -347,6 +365,7 @@ final class ParentZoneViewModelTests: XCTestCase {
         )
         let storageConfigurationStore = StorageConfigurationStore(userDefaults: userDefaults)
         let managedStorageClient = ManagedStorageClient(backend: backendClient)
+        let safetyConfigurationStore = SafetyConfigurationStore(userDefaults: userDefaults)
 
         let byoConfig = UserStorageConfig(
             endpoint: URL(string: "https://example.com")!,
@@ -400,6 +419,18 @@ final class ParentZoneViewModelTests: XCTestCase {
             nostrClient: nostrClient,
             relayDirectory: relayDirectory
         )
+        let reportCoordinator = ReportCoordinator(
+            reportStore: reportStore,
+            remoteVideoStore: remoteVideoStore,
+            videoLibrary: videoLibrary,
+            directMessageOutbox: directMessageOutbox,
+            keyStore: keyStore,
+            backendClient: backendClient,
+            safetyStore: safetyConfigurationStore,
+            storagePaths: storagePaths,
+            relationshipStore: relationshipStore,
+            followCoordinator: followCoordinator
+        )
 
         let activeProfile = try profileStore.createProfile(
             name: "Test Child",
@@ -429,13 +460,18 @@ final class ParentZoneViewModelTests: XCTestCase {
             relayDirectory: relayDirectory,
             syncCoordinator: syncCoordinator,
             directMessageOutbox: directMessageOutbox,
+            likeStore: likeStore,
+            likePublisher: likePublisher,
             storageRouter: storageRouter,
             videoSharePublisher: videoSharePublisher,
             videoShareCoordinator: videoShareCoordinator,
             relationshipStore: relationshipStore,
             followCoordinator: followCoordinator,
+            reportStore: reportStore,
+            reportCoordinator: reportCoordinator,
             backendClient: backendClient,
             storageConfigurationStore: storageConfigurationStore,
+            safetyConfigurationStore: safetyConfigurationStore,
             managedStorageClient: managedStorageClient,
             byoStorageClient: minioClient,
             backendBaseURL: URL(string: "https://example.com")!,

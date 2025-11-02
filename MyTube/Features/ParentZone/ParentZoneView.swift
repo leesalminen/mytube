@@ -558,6 +558,8 @@ private extension ParentZoneView {
             librarySection
         case .storage:
             storageSection
+        case .safety:
+            safetySection
         case .settings:
             settingsSection
         }
@@ -948,6 +950,49 @@ private extension ParentZoneView {
         }
     }
 
+    private var safetySection: some View {
+        insetGroupedList {
+            Section("Inbound Reports") {
+                let inbound = viewModel.inboundReports()
+                if inbound.isEmpty {
+                    Text("No one has reported your family's videos.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(inbound, id: \.id) { report in
+                        inboundReportRow(report)
+                    }
+                }
+            }
+
+            Section("Outbound Reports") {
+                let outbound = viewModel.outboundReports()
+                if outbound.isEmpty {
+                    Text("You haven't reported any shared videos yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(outbound, id: \.id) { report in
+                        outboundReportRow(report)
+                    }
+                }
+            }
+
+            Section("Blocked Families") {
+                let blocked = viewModel.followRelationships.filter { $0.status == .blocked }
+                if blocked.isEmpty {
+                    Text("No families are blocked.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(blocked, id: \.id) { follow in
+                        blockedFamilyRow(follow)
+                    }
+                }
+            }
+        }
+    }
+
     private var settingsSection: some View {
         insetGroupedList {
             Section("Relays") {
@@ -1034,6 +1079,126 @@ private extension ParentZoneView {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func inboundReportRow(_ report: ReportModel) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(report.reason.displayName)
+                    .font(.headline)
+                Spacer()
+                Text(report.createdAt, style: .relative)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Reporter: \(shortKey(report.reporterKey))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Status: \(reportStatusText(report.status))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if let note = report.note, !note.isEmpty {
+                Text(note)
+                    .font(.footnote)
+            }
+
+            HStack(spacing: 12) {
+                Button("Mark Reviewed") {
+                    viewModel.markReportReviewed(report)
+                }
+                .buttonStyle(.bordered)
+
+                Button("Dismiss") {
+                    viewModel.dismissReport(report)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.gray.opacity(0.2))
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func outboundReportRow(_ report: ReportModel) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(report.reason.displayName)
+                    .font(.headline)
+                Spacer()
+                Text(report.createdAt, style: .relative)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Subject child: \(shortKey(report.subjectChild))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Status: \(reportStatusText(report.status))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            if let action = report.actionTaken, action != .none {
+                Text("Action: \(reportActionText(action))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let note = report.note, !note.isEmpty {
+                Text(note)
+                    .font(.footnote)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func blockedFamilyRow(_ follow: FollowModel) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            let followerName = viewModel.followerProfile(for: follow)?.displayName ?? shortKey(follow.followerChild)
+            let targetName = viewModel.targetProfile(for: follow)?.displayName ?? shortKey(follow.targetChild)
+
+            Text("\(followerName) ↔︎ \(targetName)")
+                .font(.headline)
+
+            if let parentKey = viewModel.remoteParentKey(for: follow) {
+                Text("Parent: \(shortKey(parentKey))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Updated \(follow.updatedAt, style: .relative)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Button("Unblock") {
+                viewModel.unblockFamily(for: follow)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func reportStatusText(_ status: ReportStatus) -> String {
+        switch status {
+        case .pending: return "Pending"
+        case .acknowledged: return "Reviewed"
+        case .dismissed: return "Dismissed"
+        case .actioned: return "Actioned"
+        }
+    }
+
+    private func reportActionText(_ action: ReportAction) -> String {
+        switch action {
+        case .none, .reportOnly: return "Report only"
+        case .unfollow: return "Unfollowed"
+        case .block: return "Blocked"
+        case .deleted: return "Deleted"
         }
     }
 
@@ -1668,6 +1833,7 @@ private enum ParentZoneSection: String, CaseIterable, Identifiable {
     case connections
     case library
     case storage
+    case safety
     case settings
 
     var id: Self { self }
@@ -1679,6 +1845,7 @@ private enum ParentZoneSection: String, CaseIterable, Identifiable {
         case .connections: return "Connections"
         case .library: return "Library"
         case .storage: return "Storage"
+        case .safety: return "Safety"
         case .settings: return "Settings"
         }
     }

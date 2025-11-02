@@ -72,6 +72,8 @@ struct VideoModel: Identifiable, Hashable {
     var cvLabels: [String]
     var faceCount: Int
     var loudness: Double
+    var reportedAt: Date?
+    var reportReason: String?
 
     init(
         id: UUID,
@@ -90,7 +92,9 @@ struct VideoModel: Identifiable, Hashable {
         tags: [String],
         cvLabels: [String],
         faceCount: Int,
-        loudness: Double
+        loudness: Double,
+        reportedAt: Date?,
+        reportReason: String?
     ) {
         self.id = id
         self.profileId = profileId
@@ -109,6 +113,8 @@ struct VideoModel: Identifiable, Hashable {
         self.cvLabels = cvLabels
         self.faceCount = faceCount
         self.loudness = loudness
+        self.reportedAt = reportedAt
+        self.reportReason = reportReason
     }
 
     init?(entity: VideoEntity) {
@@ -140,7 +146,9 @@ struct VideoModel: Identifiable, Hashable {
             tags: Self.decodeJSON(tagsJSON),
             cvLabels: Self.decodeJSON(labelsJSON),
             faceCount: Int(entity.faceCount),
-            loudness: entity.loudness
+            loudness: entity.loudness,
+            reportedAt: entity.reportedAt,
+            reportReason: entity.reportReason
         )
     }
 
@@ -149,6 +157,10 @@ struct VideoModel: Identifiable, Hashable {
               let array = try? JSONDecoder().decode([String].self, from: data)
         else { return [] }
         return array
+    }
+
+    var isReported: Bool {
+        reportedAt != nil
     }
 }
 

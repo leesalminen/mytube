@@ -11,8 +11,10 @@ import SwiftUI
 struct PlayerView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel: PlayerViewModel
+    private let environment: AppEnvironment
 
     init(rankedVideo: RankingEngine.RankedVideo, environment: AppEnvironment) {
+        self.environment = environment
         _viewModel = StateObject(wrappedValue: PlayerViewModel(rankedVideo: rankedVideo, environment: environment))
     }
 
@@ -30,17 +32,29 @@ struct PlayerView: View {
                     .tint(.accentColor)
 
                 HStack(spacing: 24) {
-                    ControlButton(systemName: viewModel.video.liked ? "heart.fill" : "heart") {
+                    PlaybackControlButton(systemName: viewModel.video.liked ? "heart.fill" : "heart") {
                         viewModel.toggleLike()
                     }
-                    ControlButton(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill") {
+                    PlaybackControlButton(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill") {
                         viewModel.togglePlayPause()
                     }
-                    ControlButton(systemName: "xmark") {
+                    PlaybackControlButton(systemName: "xmark") {
                         dismiss()
                     }
                 }
                 .font(.title2)
+
+                PlaybackLikeSummaryView(
+                    likeCount: viewModel.likeCount,
+                    records: viewModel.likeRecords
+                )
+
+                PlaybackMetricRow(
+                    accent: environment.activeProfile.theme.kidPalette.accent,
+                    plays: viewModel.video.playCount,
+                    completionRate: viewModel.video.completionRate,
+                    replayRate: viewModel.video.replayRate
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -50,18 +64,22 @@ struct PlayerView: View {
         .background(KidAppBackground())
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }
-    }
-}
-
-private struct ControlButton: View {
-    let systemName: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .frame(width: 56, height: 56)
+        .alert(
+            "Couldn't update like",
+            isPresented: Binding(
+                get: { viewModel.likeError != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        viewModel.clearLikeError()
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                viewModel.clearLikeError()
+            }
+        } message: {
+            Text(viewModel.likeError ?? "Something went wrong.")
         }
-        .buttonStyle(KidCircleIconButtonStyle())
     }
 }

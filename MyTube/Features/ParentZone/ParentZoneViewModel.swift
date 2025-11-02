@@ -48,6 +48,7 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var childSecretVisibility: Set<UUID> = []
     @Published private(set) var publishingChildIDs: Set<UUID> = []
     @Published var followRelationships: [FollowModel] = []
+    @Published var reports: [ReportModel] = []
     @Published var storageMode: StorageModeSelection = .managed
     @Published var entitlement: CloudEntitlement?
     @Published var isRefreshingEntitlement = false
@@ -90,6 +91,13 @@ final class ParentZoneViewModel: ObservableObject {
             }
             .sink { [weak self] follows in
                 self?.followRelationships = follows
+            }
+            .store(in: &cancellables)
+
+        environment.reportStore.$reports
+            .receive(on: RunLoop.main)
+            .sink { [weak self] reports in
+                self?.reports = reports.sorted { $0.createdAt > $1.createdAt }
             }
             .store(in: &cancellables)
 
@@ -650,6 +658,71 @@ final class ParentZoneViewModel: ObservableObject {
         followRelationships.filter { follow in
             guard follow.isFullyApproved else { return false }
             return followerProfile(for: follow) != nil || targetProfile(for: follow) != nil
+        }
+    }
+
+    func inboundReports() -> [ReportModel] {
+        reports.filter { !$0.isOutbound }
+    }
+
+    func outboundReports() -> [ReportModel] {
+        reports.filter { $0.isOutbound }
+    }
+
+    func markReportReviewed(_ report: ReportModel) {
+        Task {
+            do {
+                try await environment.reportStore.updateStatus(
+                    reportId: report.id,
+                    status: .acknowledged,
+                    action: report.actionTaken,
+                    lastActionAt: Date()
+                )
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func dismissReport(_ report: ReportModel) {
+        Task {
+            do {
+                try await environment.reportStore.updateStatus(
+                    reportId: report.id,
+                    status: .dismissed,
+                    action: report.actionTaken,
+                    lastActionAt: Date()
+                )
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func unblockFamily(for follow: FollowModel) {
+        Task {
+            guard let remoteKey = remoteParentKey(for: follow) else {
+                await MainActor.run {
+                    self.errorMessage = "Could not determine remote parent key to unblock."
+                }
+                return
+            }
+
+            do {
+                _ = try await environment.followCoordinator.revokeFollow(
+                    follow: follow,
+                    remoteParentKey: remoteKey,
+                    now: Date()
+                )
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
         }
     }
 

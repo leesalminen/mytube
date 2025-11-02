@@ -149,7 +149,16 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             return makeSharedVideo(from: model)
         }
 
-        let grouped = Dictionary(grouping: items, by: { $0.ownerKey })
+        let visibleItems = items.filter { item in
+            switch item.video.statusValue {
+            case .blocked, .reported, .deleted:
+                return false
+            default:
+                return true
+            }
+        }
+
+        let grouped = Dictionary(grouping: visibleItems, by: { $0.ownerKey })
         var sections: [SharedRemoteSection] = grouped.map { key, videos in
             let sortedVideos = videos.sorted { $0.video.createdAt > $1.video.createdAt }
             let displayName = sortedVideos.first?.ownerDisplayName ?? fallbackOwnerLabel(for: key)

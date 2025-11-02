@@ -232,6 +232,56 @@ actor FollowCoordinator {
         )
     }
 
+    @discardableResult
+    func blockFollow(
+        follow: FollowModel,
+        remoteParentKey: String,
+        now: Date = Date()
+    ) async throws -> FollowModel {
+        guard let parentIdentity = try identityManager.parentIdentity() else {
+            throw FollowCoordinatorError.parentIdentityMissing
+        }
+
+        let followerChild = try normalizePublicKey(follow.followerChild)
+        let targetChild = try normalizePublicKey(follow.targetChild)
+        let remoteParent = try normalizeParentKey(remoteParentKey)
+
+        let followerHex = followerChild.hex
+        let targetHex = targetChild.hex
+
+        let message = FollowMessage(
+            followerChild: followerHex,
+            targetChild: targetHex,
+            approvedFrom: false,
+            approvedTo: false,
+            status: FollowModel.Status.blocked.rawValue,
+            by: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex,
+            timestamp: now
+        )
+
+        try await directMessageOutbox.sendMessage(
+            message,
+            kind: .follow,
+            recipientPublicKey: remoteParentKey,
+            additionalTags: [NostrTagBuilder.make(name: "d", value: followPointerIdentifier(follower: followerHex, target: targetHex))],
+            createdAt: now
+        )
+
+        try await publishFollowPointer(
+            message: message,
+            followerHex: followerHex,
+            targetHex: targetHex,
+            signerPair: parentIdentity.keyPair,
+            createdAt: now
+        )
+
+        return try relationshipStore.upsertFollow(
+            message: message,
+            updatedAt: now,
+            participantKeys: [remoteParent.displayValue]
+        )
+    }
+
     // MARK: - Helpers
 
     private func publishFollowPointer(
