@@ -55,46 +55,55 @@ private struct SidebarView: View {
     @Binding var selection: AppRootView.Route?
 
     var body: some View {
-        List(selection: $selection) {
-            Section("Browse") {
-                NavigationLink(value: AppRootView.Route.home) {
-                    Label("Home", systemImage: "house.fill")
-                }
-                NavigationLink(value: AppRootView.Route.capture) {
-                    Label("Capture", systemImage: "video.badge.plus")
-                }
-                NavigationLink(value: AppRootView.Route.editor) {
-                    Label("Editor", systemImage: "wand.and.stars")
-                }
-                NavigationLink(value: AppRootView.Route.parentZone) {
-                    Label("Parent Zone", systemImage: "lock.shield")
-                }
-            }
-
-            Section("Active Profile") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(appEnvironment.activeProfile.name)
-                        .font(.headline)
-
-                    Picker(
-                        "Theme",
-                        selection: Binding(
-                            get: { appEnvironment.activeProfile.theme },
-                            set: { newTheme in
-                                applyTheme(newTheme)
-                            }
-                        )
-                    ) {
-                        ForEach(ThemeDescriptor.allCases, id: \.self) { theme in
-                            Text(theme.displayName).tag(theme)
-                        }
+        VStack(spacing: 0) {
+            List(selection: $selection) {
+                Section("Browse") {
+                    NavigationLink(value: AppRootView.Route.home) {
+                        Label("Home", systemImage: "house.fill")
                     }
-                    .pickerStyle(.menu)
+                    NavigationLink(value: AppRootView.Route.capture) {
+                        Label("Capture", systemImage: "video.badge.plus")
+                    }
+                    NavigationLink(value: AppRootView.Route.editor) {
+                        Label("Editor", systemImage: "wand.and.stars")
+                    }
+                    NavigationLink(value: AppRootView.Route.parentZone) {
+                        Label("Parent Zone", systemImage: "lock.shield")
+                    }
+                }
+
+                Section("Active Profile") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(appEnvironment.activeProfile.name)
+                            .font(.headline)
+
+                        Picker(
+                            "Theme",
+                            selection: Binding(
+                                get: { appEnvironment.activeProfile.theme },
+                                set: { newTheme in
+                                    applyTheme(newTheme)
+                                }
+                            )
+                        ) {
+                            ForEach(ThemeDescriptor.allCases, id: \.self) { theme in
+                                Text(theme.displayName).tag(theme)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
                 }
             }
+            .frame(maxHeight: .infinity)
+            .navigationTitle("Tubestr")
+            .scrollContentBackground(.hidden)
+
+            Text(AppVersionFormatter.formatted)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
         }
-        .navigationTitle("Tubestr")
-        .scrollContentBackground(.hidden)
     }
 }
 
