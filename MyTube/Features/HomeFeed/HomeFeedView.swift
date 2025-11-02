@@ -38,7 +38,7 @@ struct HomeFeedView: View {
                 .presentationDetents([.fraction(0.92), .large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(32)
-                .presentationSizing(.page)
+                .presentationSizingPageIfAvailable()
         }
         .sheet(
             item: Binding(
@@ -50,7 +50,7 @@ struct HomeFeedView: View {
                 .presentationDetents([.fraction(0.92), .large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(32)
-                .presentationSizing(.page)
+                .presentationSizingPageIfAvailable()
         }
         .onAppear {
             viewModel.bind(to: appEnvironment)
@@ -341,6 +341,10 @@ private struct RemoteVideoCard: View, Identifiable {
             return "exclamationmark.triangle.fill"
         case .deleted:
             return "trash.fill"
+        case .blocked:
+            return "hand.raised.fill"
+        case .reported:
+            return "exclamationmark.bubble.fill"
         }
     }
 
@@ -358,6 +362,10 @@ private struct RemoteVideoCard: View, Identifiable {
             return .orange
         case .deleted:
             return .red
+        case .blocked:
+            return .red
+        case .reported:
+            return .orange
         }
     }
 
@@ -375,6 +383,10 @@ private struct RemoteVideoCard: View, Identifiable {
             return "Share revoked by sender."
         case .deleted:
             return "Video deleted by sender."
+        case .blocked:
+            return "This video is blocked."
+        case .reported:
+            return "This video is under review."
         }
     }
 
@@ -382,7 +394,7 @@ private struct RemoteVideoCard: View, Identifiable {
         switch status {
         case .available, .failed, .downloaded:
             return true
-        case .downloading, .revoked, .deleted:
+        case .downloading, .revoked, .deleted, .blocked, .reported:
             return false
         }
     }
@@ -481,6 +493,10 @@ private struct RemoteVideoCard: View, Identifiable {
             return "Revoked"
         case .deleted:
             return "Deleted"
+        case .blocked:
+            return "Blocked"
+        case .reported:
+            return "Reported"
         }
     }
 }

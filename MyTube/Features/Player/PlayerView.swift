@@ -12,6 +12,7 @@ struct PlayerView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var viewModel: PlayerViewModel
     private let environment: AppEnvironment
+    @State private var showingReportSheet = false
 
     init(rankedVideo: RankingEngine.RankedVideo, environment: AppEnvironment) {
         self.environment = environment
@@ -19,51 +20,87 @@ struct PlayerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 24) {
-            VideoPlayer(player: viewModel.player)
-                .frame(maxHeight: 480)
-                .background(Color.black)
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 16) {
-                Text(viewModel.video.title)
-                    .font(.title.bold())
-                ProgressView(value: viewModel.progress)
-                    .tint(.accentColor)
-
-                HStack(spacing: 24) {
-                    PlaybackControlButton(systemName: viewModel.video.liked ? "heart.fill" : "heart") {
-                        viewModel.toggleLike()
-                    }
-                    PlaybackControlButton(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill") {
-                        viewModel.togglePlayPause()
-                    }
-                    PlaybackControlButton(systemName: "xmark") {
-                        dismiss()
+        ScrollView {
+            VStack(spacing: 24) {
+                HStack {
+                    Spacer()
+                    ReportButtonChip {
+                        viewModel.reportError = nil
+                        showingReportSheet = true
                     }
                 }
-                .font(.title2)
 
-                PlaybackLikeSummaryView(
-                    likeCount: viewModel.likeCount,
-                    records: viewModel.likeRecords
-                )
+                VideoPlayer(player: viewModel.player)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 540)
+                    .background(Color.black)
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
 
-                PlaybackMetricRow(
-                    accent: environment.activeProfile.theme.kidPalette.accent,
-                    plays: viewModel.video.playCount,
-                    completionRate: viewModel.video.completionRate,
-                    replayRate: viewModel.video.replayRate
-                )
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(viewModel.video.title)
+                        .font(.title.bold())
+                    ProgressView(value: viewModel.progress)
+                        .tint(.accentColor)
+
+                    HStack(spacing: 24) {
+                        PlaybackControlButton(systemName: viewModel.video.liked ? "heart.fill" : "heart") {
+                            viewModel.toggleLike()
+                        }
+                        PlaybackControlButton(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill") {
+                            viewModel.togglePlayPause()
+                        }
+                        PlaybackControlButton(systemName: "xmark") {
+                            dismiss()
+                        }
+                    }
+                    .font(.title2)
+
+                    PlaybackLikeSummaryView(
+                        likeCount: viewModel.likeCount,
+                        records: viewModel.likeRecords
+                    )
+
+                    PlaybackMetricRow(
+                        accent: environment.activeProfile.theme.kidPalette.accent,
+                        plays: viewModel.video.playCount,
+                        completionRate: viewModel.video.completionRate,
+                        replayRate: viewModel.video.replayRate
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            Spacer()
+            .padding(.horizontal, 32)
+            .padding(.top, 32)
+            .padding(.bottom, 48)
         }
-        .padding(32)
         .background(KidAppBackground())
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }
+        .sheet(isPresented: $showingReportSheet) {
+            ReportAbuseSheet(
+                allowsRelationshipActions: false,
+                isSubmitting: viewModel.isReporting,
+                errorMessage: Binding(
+                    get: { viewModel.reportError },
+                    set: { viewModel.reportError = $0 }
+                ),
+                onSubmit: { reason, note, action in
+                    Task { await viewModel.reportVideo(reason: reason, note: note, action: action) }
+                },
+                onCancel: {
+                    viewModel.resetReportState()
+                    showingReportSheet = false
+                }
+            )
+            .presentationDetents([.medium, .large])
+        }
+        .onChange(of: viewModel.reportSuccess) { success in
+            if success {
+                showingReportSheet = false
+                dismiss()
+                viewModel.resetReportState()
+            }
+        }
         .alert(
             "Couldn't update like",
             isPresented: Binding(

@@ -56,7 +56,7 @@ struct EditorHubView: View {
                 .presentationDetents([.fraction(0.95), .large])
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(32)
-                .presentationSizing(.page)
+                .presentationSizingPageIfAvailable()
         }
         .overlay(alignment: .center) {
             if viewModel.videos.isEmpty {

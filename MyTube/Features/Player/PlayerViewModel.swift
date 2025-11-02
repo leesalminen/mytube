@@ -18,6 +18,9 @@ final class PlayerViewModel: ObservableObject {
     @Published private(set) var likeCount: Int = 0
     @Published private(set) var likeRecords: [LikeRecord] = []
     @Published var likeError: String?
+    @Published var reportError: String?
+    @Published var isReporting = false
+    @Published var reportSuccess = false
 
     var player: AVPlayer { internalPlayer }
 
@@ -182,6 +185,48 @@ final class PlayerViewModel: ObservableObject {
         likeError = nil
     }
 
+    func reportVideo(
+        reason: ReportReason,
+        note: String?,
+        action: ReportAction
+    ) async {
+        guard !isReporting else { return }
+        isReporting = true
+        reportError = nil
+        let subjectChild = reportSubjectChild()
+        let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let noteValue = (trimmedNote?.isEmpty ?? true) ? nil : trimmedNote
+
+        do {
+            _ = try await environment.reportCoordinator.submitReport(
+                videoId: video.id.uuidString,
+                subjectChild: subjectChild,
+                reason: reason,
+                note: noteValue,
+                action: action
+            )
+
+            if let updated = try? await environment.videoLibrary.markVideoReported(
+                videoId: video.id,
+                reason: reason
+            ) {
+                video = updated
+            }
+
+            reportSuccess = true
+        } catch {
+            reportError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+
+        isReporting = false
+    }
+
+    func resetReportState() {
+        reportSuccess = false
+        reportError = nil
+        isReporting = false
+    }
+
     private func play() {
         internalPlayer.play()
         isPlaying = true
@@ -258,6 +303,10 @@ final class PlayerViewModel: ObservableObject {
             logger.error("Unable to resolve child identity for profile \(profile.id): \(error.localizedDescription, privacy: .public)")
         }
         refreshLikes()
+    }
+
+    private func reportSubjectChild() -> String {
+        ""
     }
 
     private func handleCompletion() {

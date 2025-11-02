@@ -271,6 +271,10 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             error = "This video was revoked by the sender."
         case .deleted:
             error = "This video was deleted."
+        case .blocked:
+            error = "This video is blocked."
+        case .reported:
+            error = "This video is being reviewed."
         }
     }
 

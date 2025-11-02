@@ -15,6 +15,7 @@ struct ReportAbuseSheet: View {
     @State private var shouldUnfollow = false
     @FocusState private var noteFocused: Bool
 
+    var allowsRelationshipActions: Bool = true
     let isSubmitting: Bool
     @Binding var errorMessage: String?
     let onSubmit: (ReportReason, String?, ReportAction) -> Void
@@ -32,17 +33,19 @@ struct ReportAbuseSheet: View {
                     .pickerStyle(.inline)
                 }
 
-                Section("Actions") {
-                    Toggle("Unfollow this family", isOn: $shouldUnfollow)
-                        .disabled(shouldBlock || isSubmitting)
+                if allowsRelationshipActions {
+                    Section("Actions") {
+                        Toggle("Unfollow this family", isOn: $shouldUnfollow)
+                            .disabled(shouldBlock || isSubmitting)
 
-                    Toggle("Block this family", isOn: $shouldBlock)
-                        .disabled(isSubmitting)
-                        .onChange(of: shouldBlock) { newValue in
-                            if newValue {
-                                shouldUnfollow = true
+                        Toggle("Block this family", isOn: $shouldBlock)
+                            .disabled(isSubmitting)
+                            .onChange(of: shouldBlock) { newValue in
+                                if newValue {
+                                    shouldUnfollow = true
+                                }
                             }
-                        }
+                    }
                 }
 
                 Section("Notes (optional)") {
@@ -99,5 +102,22 @@ struct ReportAbuseSheet: View {
         } else {
             return .reportOnly
         }
+    }
+}
+
+struct ReportButtonChip: View {
+    var title: String = "Report"
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: "hand.raised.fill")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.red.opacity(0.12), in: Capsule())
+                .foregroundStyle(.red)
+        }
+        .accessibilityLabel(title)
     }
 }

@@ -188,7 +188,7 @@ class LikeStore: ObservableObject {
     
     private func loadLikes() async {
         let context = persistenceController.container.viewContext
-        let request = NSFetchRequest<LikeEntity>(entityName: "LikeEntity")
+        let request = NSFetchRequest<LikeEntity>(entityName: "Like")
         
         do {
             let entities = try context.fetch(request)
@@ -241,7 +241,7 @@ class LikeStore: ObservableObject {
         
         await context.perform {
             // Check if like already exists
-            let request = NSFetchRequest<LikeEntity>(entityName: "LikeEntity")
+            let request = NSFetchRequest<LikeEntity>(entityName: "Like")
             let canonicalKey = self.normalizeKey(record.viewerChildNpub)
             request.predicate = NSPredicate(
                 format: "videoId == %@ AND viewerChildNpub == %@",
@@ -271,7 +271,7 @@ class LikeStore: ObservableObject {
         let context = persistenceController.container.newBackgroundContext()
         
         await context.perform {
-            let request = NSFetchRequest<LikeEntity>(entityName: "LikeEntity")
+            let request = NSFetchRequest<LikeEntity>(entityName: "Like")
             let canonicalKey = self.normalizeKey(viewerChildNpub)
             request.predicate = NSPredicate(
                 format: "videoId == %@ AND viewerChildNpub == %@",

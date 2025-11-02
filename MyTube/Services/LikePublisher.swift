@@ -109,14 +109,16 @@ actor LikePublisher {
     }
     
     private func getVideoOwnerInfo(videoId: UUID) async throws -> (ownerChildNpub: String, ownerParentNpubs: [String]) {
-        // Try to find in remote videos first
-        let remoteVideos = await remoteVideoStore.allVideos()
-        if let remoteVideo = remoteVideos.first(where: { $0.id == videoId.uuidString }) {
-            // Get parent npubs for this child
-            let parentNpubs = try await getParentNpubs(for: remoteVideo.ownerChild)
-            return (remoteVideo.ownerChild, parentNpubs)
+        do {
+            if let remoteVideo = try remoteVideoStore.fetchVideo(videoId: videoId.uuidString) {
+                let parentNpubs = try await getParentNpubs(for: remoteVideo.ownerChild)
+                return (remoteVideo.ownerChild, parentNpubs)
+            }
+        } catch {
+            logger.error("Failed to load remote video \(videoId) for like publishing: \(error.localizedDescription, privacy: .public)")
+            throw error
         }
-        
+
         // If not found in remote videos, it might be a local video
         // For local videos, we would need to look up the owner from the video share messages
         // For now, throw an error as likes are primarily for shared videos

@@ -225,7 +225,7 @@ final class RemoteVideoStore {
                 entity.localMediaPath = nil
                 entity.localThumbPath = nil
                 entity.lastDownloadedAt = nil
-                entity.status = Status.blocked.rawValue
+                entity.status = RemoteVideoModel.Status.blocked.rawValue
                 entity.downloadError = reason
                 entity.lastSyncedAt = timestamp
                 try context.save()

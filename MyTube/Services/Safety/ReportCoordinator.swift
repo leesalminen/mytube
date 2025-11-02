@@ -79,14 +79,12 @@ actor ReportCoordinator {
             timestamp: createdAt
         )
 
-        let stored = try await MainActor.run {
-            try await self.reportStore.ingestReportMessage(
-                message,
-                isOutbound: true,
-                createdAt: createdAt,
-                action: action
-            )
-        }
+        let stored = try await reportStore.ingestReportMessage(
+            message,
+            isOutbound: true,
+            createdAt: createdAt,
+            action: action
+        )
 
         let recipients = await resolveRecipients(
             for: videoId,
@@ -127,14 +125,12 @@ actor ReportCoordinator {
 
         let finalAction: ReportAction = action == .none ? .reportOnly : action
         do {
-            try await MainActor.run {
-                try await self.reportStore.updateStatus(
-                    reportId: stored.id,
-                    status: .actioned,
-                    action: finalAction,
-                    lastActionAt: createdAt
-                )
-            }
+            try await reportStore.updateStatus(
+                reportId: stored.id,
+                status: .actioned,
+                action: finalAction,
+                lastActionAt: createdAt
+            )
         } catch {
             logger.error("Failed to update report status after submission: \(error.localizedDescription, privacy: .public)")
         }
@@ -277,8 +273,7 @@ actor ReportCoordinator {
            let stored = safetyStore.moderatorPublicKey(),
            let fetchedAt = safetyStore.moderatorKeyFetchedAt(),
            Date().timeIntervalSince(fetchedAt) < moderatorCacheDuration {
-            cachedModeratorKey = stored
-            moderatorKeyExpiresAt = fetchedAt.addingTimeInterval(moderatorCacheDuration)
+            cacheModeratorKey(stored, fetchedAt: fetchedAt)
             return stored
         }
 
@@ -288,20 +283,34 @@ actor ReportCoordinator {
 
         let task = Task<String?, Never> { [weak self] in
             guard let self else { return nil }
-            do {
-                let response = try await self.backendClient.fetchModeratorKey()
-                self.cachedModeratorKey = response
-                self.moderatorKeyExpiresAt = Date().addingTimeInterval(self.moderatorCacheDuration)
-                self.safetyStore.saveModeratorPublicKey(response)
-                return response
-            } catch {
-                self.logger.error("Failed to fetch moderator key: \(error.localizedDescription, privacy: .public)")
-                return self.safetyStore.moderatorPublicKey()
-            }
+            return await self.performModeratorKeyFetch()
         }
         moderatorFetchTask = task
         let key = await task.value
         moderatorFetchTask = nil
         return key
+    }
+
+    private func performModeratorKeyFetch() async -> String? {
+        do {
+            let response = try await backendClient.fetchModeratorKey()
+            cacheModeratorKey(response)
+            safetyStore.saveModeratorPublicKey(response)
+            return response
+        } catch {
+            logger.error("Failed to fetch moderator key: \(error.localizedDescription, privacy: .public)")
+            if let fallback = safetyStore.moderatorPublicKey(),
+               let fetchedAt = safetyStore.moderatorKeyFetchedAt() {
+                cacheModeratorKey(fallback, fetchedAt: fetchedAt)
+                return fallback
+            }
+            cacheModeratorKey(nil)
+            return nil
+        }
+    }
+
+    private func cacheModeratorKey(_ key: String?, fetchedAt: Date = Date()) {
+        cachedModeratorKey = key
+        moderatorKeyExpiresAt = key != nil ? fetchedAt.addingTimeInterval(moderatorCacheDuration) : nil
     }
 }

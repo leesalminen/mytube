@@ -24,97 +24,95 @@ struct RemoteVideoPlayerView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            HStack {
-                Spacer()
-                Button {
-                    viewModel.reportError = nil
-                    showingReportSheet = true
-                } label: {
-                    Label("Report", systemImage: "hand.raised.fill")
-                        .labelStyle(.iconOnly)
-                        .foregroundStyle(.red)
-                        .padding(8)
-                }
-                .accessibilityLabel("Report or block this video")
-            }
-
-            Group {
-                if let player = viewModel.player {
-                    VideoPlayer(player: player)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 360)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                } else {
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .fill(Color.orange.opacity(0.2))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 360)
-                        .overlay(
-                            VStack(spacing: 12) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .font(.system(size: 36))
-                                    .foregroundStyle(.orange)
-                                Text(viewModel.playbackError ?? "Preparing video…")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                        )
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 16) {
-                Text(video.video.title)
-                    .font(.title.bold())
-                ProgressView(value: viewModel.progress)
-                    .tint(.accentColor)
-
-                HStack(spacing: 24) {
-                    PlaybackControlButton(systemName: viewModel.isLiked ? "heart.fill" : "heart") {
-                        viewModel.toggleLike()
-                    }
-                    PlaybackControlButton(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill") {
-                        viewModel.togglePlayPause()
-                    }
-                    PlaybackControlButton(systemName: "xmark") {
-                        viewModel.dismiss()
-                        dismiss()
+        ScrollView {
+            VStack(spacing: 24) {
+                HStack {
+                    Spacer()
+                    ReportButtonChip {
+                        viewModel.reportError = nil
+                        showingReportSheet = true
                     }
                 }
-                .font(.title2)
 
-                PlaybackLikeSummaryView(
-                    likeCount: viewModel.likeCount,
-                    records: viewModel.likeRecords
-                )
+                Group {
+                    if let player = viewModel.player {
+                        VideoPlayer(player: player)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 540)
+                            .background(Color.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    } else {
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            .fill(Color.orange.opacity(0.2))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 540)
+                            .overlay(
+                                VStack(spacing: 12) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.system(size: 36))
+                                        .foregroundStyle(.orange)
+                                    Text(viewModel.playbackError ?? "Preparing video…")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                            )
+                    }
+                }
 
-                PlaybackMetricRow(
-                    accent: environment.activeProfile.theme.kidPalette.accent,
-                    plays: viewModel.playbackRecord?.playCount ?? 0,
-                    completionRate: viewModel.playbackRecord?.completionRate ?? 0,
-                    replayRate: viewModel.playbackRecord?.replayRate ?? 0
-                )
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(video.video.title)
+                        .font(.title.bold())
+                    ProgressView(value: viewModel.progress)
+                        .tint(.accentColor)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Shared by \(video.ownerDisplayName)")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 16) {
-                        Label(viewModel.formattedDuration, systemImage: "clock")
-                        Label {
-                            Text(video.video.createdAt, style: .date)
-                        } icon: {
-                            Image(systemName: "calendar")
+                    HStack(spacing: 24) {
+                        PlaybackControlButton(systemName: viewModel.isLiked ? "heart.fill" : "heart") {
+                            viewModel.toggleLike()
+                        }
+                        PlaybackControlButton(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill") {
+                            viewModel.togglePlayPause()
+                        }
+                        PlaybackControlButton(systemName: "xmark") {
+                            viewModel.dismiss()
+                            dismiss()
                         }
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-            }
+                    .font(.title2)
 
-            Spacer()
+                    PlaybackLikeSummaryView(
+                        likeCount: viewModel.likeCount,
+                        records: viewModel.likeRecords
+                    )
+
+                    PlaybackMetricRow(
+                        accent: environment.activeProfile.theme.kidPalette.accent,
+                        plays: viewModel.playbackRecord?.playCount ?? 0,
+                        completionRate: viewModel.playbackRecord?.completionRate ?? 0,
+                        replayRate: viewModel.playbackRecord?.replayRate ?? 0
+                    )
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Shared by \(video.ownerDisplayName)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 16) {
+                            Label(viewModel.formattedDuration, systemImage: "clock")
+                            Label {
+                                Text(video.video.createdAt, style: .date)
+                            } icon: {
+                                Image(systemName: "calendar")
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 32)
+            .padding(.top, 32)
+            .padding(.bottom, 48)
         }
-        .padding(24)
         .background(KidAppBackground())
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }

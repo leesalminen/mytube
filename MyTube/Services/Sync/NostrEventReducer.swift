@@ -338,16 +338,14 @@ actor NostrEventReducer {
         let subjectIsLocalChild = localChildHexKeys().contains(subjectHex)
 
         do {
-            let stored = try await MainActor.run {
-                try await self.context.reportStore.ingestReportMessage(
-                    message,
-                    isOutbound: reporterIsLocal,
-                    createdAt: timestamp,
-                    deliveredAt: reporterIsLocal ? timestamp : nil,
-                    defaultStatus: reporterIsLocal ? .acknowledged : .pending,
-                    action: nil
-                )
-            }
+            let stored = try await context.reportStore.ingestReportMessage(
+                message,
+                isOutbound: reporterIsLocal,
+                createdAt: timestamp,
+                deliveredAt: reporterIsLocal ? timestamp : nil,
+                defaultStatus: reporterIsLocal ? .acknowledged : .pending,
+                action: nil
+            )
 
             if reporterIsLocal {
                 await handleReporterSideEffects(for: message, reason: reason, timestamp: timestamp, stored: stored)
@@ -380,14 +378,12 @@ actor NostrEventReducer {
 
         let action = stored.actionTaken == .none ? .reportOnly : stored.actionTaken
         do {
-            try await MainActor.run {
-                try await self.context.reportStore.updateStatus(
-                    reportId: stored.id,
-                    status: .actioned,
-                    action: action,
-                    lastActionAt: timestamp
-                )
-            }
+            try await context.reportStore.updateStatus(
+                reportId: stored.id,
+                status: .actioned,
+                action: action,
+                lastActionAt: timestamp
+            )
         } catch {
             logger.error("Failed updating report status after reporter side effects: \(error.localizedDescription, privacy: .public)")
         }
@@ -415,14 +411,12 @@ actor NostrEventReducer {
         }
 
         do {
-            try await MainActor.run {
-                try await self.context.reportStore.updateStatus(
-                    reportId: stored.id,
-                    status: .actioned,
-                    action: .deleted,
-                    lastActionAt: timestamp
-                )
-            }
+            try await context.reportStore.updateStatus(
+                reportId: stored.id,
+                status: .actioned,
+                action: .deleted,
+                lastActionAt: timestamp
+            )
         } catch {
             logger.error("Failed updating report status after subject side effects: \(error.localizedDescription, privacy: .public)")
         }
