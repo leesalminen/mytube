@@ -75,6 +75,11 @@ actor RelayDirectory {
         persist()
     }
 
+    func resetToDefaults() {
+        endpoints = RelayDirectory.defaultEndpoints()
+        persist()
+    }
+
     private func persist() {
         guard let data = try? JSONEncoder().encode(endpoints) else {
             return
@@ -87,7 +92,6 @@ actor RelayDirectory {
             "wss://no.str.cr",
             "wss://relay.damus.io",
             "wss://relay.snort.social",
-            "wss://nostr.mutinywallet.com"
         ].map { Endpoint(urlString: $0, isEnabled: true) }
     }
 

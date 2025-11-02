@@ -5,13 +5,21 @@
 //  Created by Codex on 10/28/25.
 //
 
-import CryptoKit
 import Foundation
+import NostrSDK
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 
 enum KeychainKeyStoreError: Error {
     case keyNotFound
     case dataCorrupted
+    case keyGenerationFailed
     case keychainFailure(OSStatus)
+}
+
+private enum KeychainAccount {
+    static let parentWrap = "parent.wrap.x25519"
 }
 
 enum NostrIdentityRole: Hashable, Sendable {
@@ -29,32 +37,115 @@ enum NostrIdentityRole: Hashable, Sendable {
 }
 
 struct NostrKeyPair: Sendable {
-    let privateKeyData: Data
-    let publicKeyData: Data
+    private let secretKeyHex: String
+    private let publicKeyHexValue: String
     let createdAt: Date
 
-    init(privateKey: Curve25519.Signing.PrivateKey, createdAt: Date = Date()) {
-        self.privateKeyData = privateKey.rawRepresentation
-        self.publicKeyData = privateKey.publicKey.rawRepresentation
+    init(secretKey: NostrSDK.SecretKey, createdAt: Date = Date()) throws {
+        let keys = NostrSDK.Keys(secretKey: secretKey)
+        self.secretKeyHex = secretKey.toHex()
+        self.publicKeyHexValue = keys.publicKey().toHex()
         self.createdAt = createdAt
     }
 
-    init(privateKeyData: Data, createdAt: Date = Date()) throws {
-        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData)
-        self.init(privateKey: key, createdAt: createdAt)
+    init(secretKeyHex: String, createdAt: Date = Date()) throws {
+        let parsed = try NostrSDK.SecretKey.parse(secretKey: secretKeyHex)
+        try self.init(secretKey: parsed, createdAt: createdAt)
     }
 
-    var publicKeyHex: String {
-        publicKeyData.hexEncodedString()
+    init(privateKeyData: Data, createdAt: Date = Date()) throws {
+        guard privateKeyData.count == 32 else {
+            throw KeychainKeyStoreError.dataCorrupted
+        }
+        let secretKey = try NostrSDK.SecretKey.fromBytes(bytes: privateKeyData)
+        try self.init(secretKey: secretKey, createdAt: createdAt)
     }
+
+    var privateKeyData: Data {
+        guard let data = Data(hexString: secretKeyHex) else {
+            preconditionFailure("Invalid secret key hex")
+        }
+        return data
+    }
+
+    var publicKeyData: Data {
+        guard let data = Data(hexString: publicKeyHexValue) else {
+            preconditionFailure("Invalid public key hex")
+        }
+        return data
+    }
+
+    var publicKeyHex: String { publicKeyHexValue }
+
+    var publicKeyBech32: String? {
+        guard let key = try? NostrSDK.PublicKey.parse(publicKey: publicKeyHexValue) else { return nil }
+        return try? key.toBech32()
+    }
+
+    var secretKeyBech32: String? {
+        guard let key = try? NostrSDK.SecretKey.parse(secretKey: secretKeyHex) else { return nil }
+        return try? key.toBech32()
+    }
+
+    func makeKeys() throws -> NostrSDK.Keys {
+        let secretKey = try NostrSDK.SecretKey.parse(secretKey: secretKeyHex)
+        return NostrSDK.Keys(secretKey: secretKey)
+    }
+
+    func secretKey() throws -> NostrSDK.SecretKey {
+        try NostrSDK.SecretKey.parse(secretKey: secretKeyHex)
+    }
+
+    func publicKey() throws -> NostrSDK.PublicKey {
+        try NostrSDK.PublicKey.parse(publicKey: publicKeyHexValue)
+    }
+
+    func exportSecretKeyHex() -> String {
+        secretKeyHex
+    }
+}
+
+struct ParentWrapKeyPair: Sendable {
+    let privateKeyData: Data
+    let createdAt: Date
+
+    #if canImport(CryptoKit)
+    func makePrivateKey() throws -> Curve25519.KeyAgreement.PrivateKey {
+        try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateKeyData)
+    }
+
+    func publicKeyData() throws -> Data {
+        try makePrivateKey().publicKey.rawRepresentation
+    }
+
+    func publicKeyBase64() throws -> String {
+        try publicKeyData().base64EncodedString()
+    }
+    #else
+    func makePrivateKey() throws -> Any {
+        throw KeychainKeyStoreError.keyGenerationFailed
+    }
+
+    func publicKeyData() throws -> Data {
+        throw KeychainKeyStoreError.keyGenerationFailed
+    }
+
+    func publicKeyBase64() throws -> String {
+        throw KeychainKeyStoreError.keyGenerationFailed
+    }
+    #endif
 }
 
 /// Handles secure storage and retrieval of Nostr keypairs using the system keychain.
 /// Parent keys target Secure Enclave via access control flags when available; child keys fall back to
 /// `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`.
 final class KeychainKeyStore {
-    private let service = "com.mytube.keys"
+    private let service: String
     private let accessQueue = DispatchQueue(label: "com.mytube.keys.access", qos: .userInitiated)
+
+    init(service: String = "com.mytube.keys") {
+        self.service = service
+    }
 
     func fetchKeyPair(role: NostrIdentityRole) throws -> NostrKeyPair? {
         try accessQueue.sync {
@@ -66,15 +157,46 @@ final class KeychainKeyStore {
         if let existing = try fetchKeyPair(role: .parent) {
             return existing
         }
-        let key = Curve25519.Signing.PrivateKey()
-        let pair = NostrKeyPair(privateKey: key)
-        try storeKeyPair(pair, role: .parent, requireBiometrics: true)
+        let secret = NostrSDK.SecretKey.generate()
+        let pair = try NostrKeyPair(secretKey: secret)
+        try storeKeyPair(pair, role: .parent, requireBiometrics: false)
         return pair
+    }
+
+    func fetchParentWrapKeyPair() throws -> ParentWrapKeyPair? {
+        try accessQueue.sync {
+            try readWrapKeyPair()
+        }
+    }
+
+    @discardableResult
+    func ensureParentWrapKeyPair(requireBiometrics: Bool = false) throws -> ParentWrapKeyPair {
+        if let existing = try fetchParentWrapKeyPair() {
+            return existing
+        }
+#if canImport(CryptoKit)
+        let privateKey = Curve25519.KeyAgreement.PrivateKey()
+        let pair = ParentWrapKeyPair(privateKeyData: privateKey.rawRepresentation, createdAt: Date())
+        try storeParentWrapKeyPair(pair, requireBiometrics: requireBiometrics)
+        return pair
+#else
+        throw KeychainKeyStoreError.keyGenerationFailed
+#endif
     }
 
     func storeKeyPair(_ pair: NostrKeyPair, role: NostrIdentityRole, requireBiometrics: Bool = false) throws {
         try accessQueue.sync {
             try writeKeyPair(pair, account: role.accountKey, requireBiometrics: requireBiometrics)
+        }
+    }
+
+    func storeParentWrapKeyPair(_ pair: ParentWrapKeyPair, requireBiometrics: Bool = false) throws {
+        try accessQueue.sync {
+            try writeData(
+                pair.privateKeyData,
+                account: KeychainAccount.parentWrap,
+                requireBiometrics: requireBiometrics
+            )
         }
     }
 
@@ -112,7 +234,35 @@ final class KeychainKeyStore {
         }
     }
 
+    func removeAll() throws {
+        try accessQueue.sync {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service
+            ]
+
+            let status = SecItemDelete(query as CFDictionary)
+            guard status == errSecSuccess || status == errSecItemNotFound else {
+                throw KeychainKeyStoreError.keychainFailure(status)
+            }
+        }
+    }
+
     private func readKeyPair(account: String) throws -> NostrKeyPair? {
+        guard let item = try readItem(account: account) else {
+            return nil
+        }
+        return try NostrKeyPair(privateKeyData: item.data, createdAt: item.createdAt)
+    }
+
+    private func readWrapKeyPair() throws -> ParentWrapKeyPair? {
+        guard let item = try readItem(account: KeychainAccount.parentWrap) else {
+            return nil
+        }
+        return ParentWrapKeyPair(privateKeyData: item.data, createdAt: item.createdAt)
+    }
+
+    private func readItem(account: String) throws -> (data: Data, createdAt: Date)? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -143,7 +293,7 @@ final class KeychainKeyStore {
             createdAt = Date()
         }
 
-        return try NostrKeyPair(privateKeyData: data, createdAt: createdAt)
+        return (data, createdAt)
     }
 
     private func writeKeyPair(
@@ -151,39 +301,43 @@ final class KeychainKeyStore {
         account: String,
         requireBiometrics: Bool
     ) throws {
-        var attributes: [String: Any] = [
+        try writeData(pair.privateKeyData, account: account, requireBiometrics: requireBiometrics)
+    }
+
+    private func writeData(
+        _ data: Data,
+        account: String,
+        requireBiometrics: Bool
+    ) throws {
+        let baseQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: pair.privateKeyData,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly
+            kSecAttrAccount as String: account
         ]
+
+        var addAttributes = baseQuery
+        addAttributes[kSecValueData as String] = data
+        addAttributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
 
         if requireBiometrics {
             var error: Unmanaged<CFError>?
             if let access = SecAccessControlCreateWithFlags(
                 nil,
-                kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
-                [.biometryCurrentSet],
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                [.userPresence],
                 &error
             ) {
-                attributes[kSecAttrAccessControl as String] = access
-                attributes.removeValue(forKey: kSecAttrAccessible as String)
+                addAttributes[kSecAttrAccessControl as String] = access
+                addAttributes.removeValue(forKey: kSecAttrAccessible as String)
             } else if let err = error?.takeRetainedValue() {
                 throw err
             }
         }
 
-        let status: OSStatus
-        if try readKeyPair(account: account) != nil {
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: service,
-                kSecAttrAccount as String: account
-            ]
-            status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        } else {
-            status = SecItemAdd(attributes as CFDictionary, nil)
+        var status = SecItemAdd(addAttributes as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            _ = SecItemDelete(baseQuery as CFDictionary)
+            status = SecItemAdd(addAttributes as CFDictionary, nil)
         }
 
         guard status == errSecSuccess else {
@@ -205,9 +359,8 @@ final class KeychainKeyStore {
     }
 }
 
-private extension Data {
+extension Data {
     func hexEncodedString() -> String {
         map { String(format: "%02hhx", $0) }.joined()
     }
 }
-

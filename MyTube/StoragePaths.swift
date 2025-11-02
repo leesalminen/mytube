@@ -66,6 +66,14 @@ final class StoragePaths {
         }
     }
 
+    func clearAllContents() throws {
+        let contents = try fileManager.contentsOfDirectory(at: baseURL, includingPropertiesForKeys: nil, options: [])
+        for item in contents {
+            try fileManager.removeItem(at: item)
+        }
+        try ensureBaseDirectories()
+    }
+
     private func ensureBaseDirectories() throws {
         try ensureDirectoryExists(at: baseURL)
 

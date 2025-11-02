@@ -38,6 +38,17 @@ struct ProfileModel: Identifiable, Hashable {
     }
 }
 
+extension ProfileModel {
+    static func placeholder() -> ProfileModel {
+        ProfileModel(
+            id: UUID(),
+            name: "",
+            theme: .ocean,
+            avatarAsset: ThemeDescriptor.ocean.defaultAvatarAsset
+        )
+    }
+}
+
 struct VideoModel: Identifiable, Hashable {
     enum Visibility {
         case visible
@@ -196,6 +207,232 @@ struct RankingStateModel: Hashable {
     private static func decodeMap(_ string: String) -> [String: Double]? {
         guard let data = string.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode([String: Double].self, from: data)
+    }
+}
+
+struct FollowRecordMetadata: Codable, Sendable {
+    var lastMessage: FollowMessage
+    var participantParentKeys: [String]
+
+    init(lastMessage: FollowMessage, participantParentKeys: [String] = []) {
+        self.lastMessage = lastMessage
+        self.participantParentKeys = participantParentKeys
+        normalizeParticipants()
+        ingest(message: lastMessage)
+    }
+
+    mutating func ingest(message: FollowMessage) {
+        lastMessage = message
+        guard let normalized = ParentIdentityKey(string: message.by)?.hex.lowercased() else { return }
+        if !participantParentKeys.contains(where: { $0.caseInsensitiveCompare(normalized) == .orderedSame }) {
+            participantParentKeys.append(normalized)
+            participantParentKeys.sort()
+        }
+    }
+
+    mutating func addParticipants(_ keys: [String]) {
+        for key in keys {
+            guard let normalized = ParentIdentityKey(string: key)?.hex.lowercased() else { continue }
+            if !participantParentKeys.contains(where: { $0.caseInsensitiveCompare(normalized) == .orderedSame }) {
+                participantParentKeys.append(normalized)
+            }
+        }
+        participantParentKeys.sort()
+    }
+
+    mutating func normalizeParticipants() {
+        var unique: Set<String> = []
+        participantParentKeys = participantParentKeys.compactMap { key in
+            guard let normalized = ParentIdentityKey(string: key)?.hex.lowercased() else { return nil }
+            guard unique.insert(normalized).inserted == true else { return nil }
+            return normalized
+        }.sorted()
+    }
+
+    static func decode(from json: String, decoder: JSONDecoder) -> FollowRecordMetadata? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        if let record = try? decoder.decode(FollowRecordMetadata.self, from: data) {
+            var normalized = record
+            normalized.normalizeParticipants()
+            normalized.ingest(message: normalized.lastMessage)
+            return normalized
+        }
+
+        if let message = try? decoder.decode(FollowMessage.self, from: data) {
+            return FollowRecordMetadata(lastMessage: message)
+        }
+
+        return nil
+    }
+
+    func encode(using encoder: JSONEncoder) -> String? {
+        guard let data = try? encoder.encode(self),
+              let string = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return string
+    }
+}
+
+struct FollowModel: Identifiable, Hashable, Sendable {
+    enum Status: String, Sendable {
+        case pending
+        case active
+        case revoked
+        case blocked
+        case unknown
+    }
+
+    let followerChild: String
+    let targetChild: String
+    let approvedFrom: Bool
+    let approvedTo: Bool
+    let status: Status
+    let updatedAt: Date
+    let metadataJSON: String?
+    let lastMessage: FollowMessage?
+    let participantParentKeys: [String]
+
+    var id: String { "\(followerChild)|\(targetChild)" }
+
+    var isFullyApproved: Bool {
+        approvedFrom && approvedTo && status == .active
+    }
+
+    init(
+        followerChild: String,
+        targetChild: String,
+        approvedFrom: Bool,
+        approvedTo: Bool,
+        status: String,
+        updatedAt: Date,
+        metadataJSON: String?
+    ) {
+        self.followerChild = followerChild
+        self.targetChild = targetChild
+        self.approvedFrom = approvedFrom
+        self.approvedTo = approvedTo
+        self.status = Status(rawValue: status) ?? .unknown
+        self.updatedAt = updatedAt
+        self.metadataJSON = metadataJSON
+
+        if let metadataJSON,
+           let record = FollowModel.decodeMetadata(metadataJSON) {
+            self.lastMessage = record.lastMessage
+            self.participantParentKeys = record.participantParentKeys
+        } else {
+            self.lastMessage = nil
+            if let metadataJSON,
+               let fallbackKeys = FollowModel.extractParentKeys(from: metadataJSON) {
+                self.participantParentKeys = fallbackKeys
+            } else {
+                self.participantParentKeys = []
+            }
+        }
+    }
+
+    init?(entity: FollowEntity) {
+        guard
+            let followerChild = entity.followerChild,
+            let targetChild = entity.targetChild,
+            let status = entity.status,
+            let updatedAt = entity.updatedAt
+        else {
+            return nil
+        }
+
+        self.init(
+            followerChild: followerChild,
+            targetChild: targetChild,
+            approvedFrom: entity.approvedFrom,
+            approvedTo: entity.approvedTo,
+            status: status,
+            updatedAt: updatedAt,
+            metadataJSON: entity.metadataJSON
+        )
+    }
+
+    static func == (lhs: FollowModel, rhs: FollowModel) -> Bool {
+        lhs.followerChild == rhs.followerChild &&
+            lhs.targetChild == rhs.targetChild &&
+            lhs.approvedFrom == rhs.approvedFrom &&
+            lhs.approvedTo == rhs.approvedTo &&
+            lhs.status == rhs.status &&
+            lhs.updatedAt == rhs.updatedAt &&
+            lhs.metadataJSON == rhs.metadataJSON &&
+            lhs.participantParentKeys == rhs.participantParentKeys
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(followerChild)
+        hasher.combine(targetChild)
+        hasher.combine(approvedFrom)
+        hasher.combine(approvedTo)
+        hasher.combine(status)
+        hasher.combine(updatedAt)
+        hasher.combine(metadataJSON)
+        hasher.combine(participantParentKeys)
+    }
+
+    func matchesTarget(childHex: String) -> Bool {
+        guard let normalized = FollowModel.normalizePublicKey(targetChild) else { return false }
+        return normalized.caseInsensitiveCompare(childHex) == .orderedSame
+    }
+
+    func remoteParentKeys(localParentHex: String) -> [String] {
+        let local = localParentHex.lowercased()
+        return participantParentKeys.filter { $0.caseInsensitiveCompare(local) != .orderedSame }
+    }
+
+    func followerChildHex() -> String? {
+        FollowModel.normalizePublicKey(followerChild)
+    }
+
+    func targetChildHex() -> String? {
+        FollowModel.normalizePublicKey(targetChild)
+    }
+
+    private static func decodeMetadata(_ json: String) -> FollowRecordMetadata? {
+        let decoder = makeMetadataDecoder()
+        return FollowRecordMetadata.decode(from: json, decoder: decoder)
+    }
+
+    private static func extractParentKeys(from json: String) -> [String]? {
+        guard
+            let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return nil
+        }
+        var keys: Set<String> = []
+        if let pubkey = object["pubkey"] as? String,
+           let normalized = ParentIdentityKey(string: pubkey)?.hex.lowercased() {
+            keys.insert(normalized)
+        }
+
+        if let tags = object["tags"] as? [[Any]] {
+            for tag in tags {
+                guard tag.count >= 2,
+                      let name = tag[0] as? String,
+                      name.caseInsensitiveCompare("p") == .orderedSame,
+                      let value = tag[1] as? String,
+                      let normalized = ParentIdentityKey(string: value)?.hex.lowercased()
+                else { continue }
+                keys.insert(normalized)
+            }
+        }
+
+        return keys.isEmpty ? nil : Array(keys).sorted()
+    }
+
+    private static func makeMetadataDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return decoder
+    }
+
+    private static func normalizePublicKey(_ input: String) -> String? {
+        ParentIdentityKey(string: input)?.hex.lowercased()
     }
 }
 

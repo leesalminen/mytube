@@ -7,19 +7,23 @@
 
 import AVFoundation
 import CoreImage
-import UIKit
 import QuartzCore
 import SwiftUI
+import UIKit
+import VideoLab
 
 enum EditRendererError: Error {
     case exportFailed
     case trackInsertionFailed
     case audioResourceMissing
+    case missingVideoTrack
+    case invalidClipRange
 }
 
 final class EditRenderer {
     private let storagePaths: StoragePaths
     private let queue = DispatchQueue(label: "com.mytube.editrenderer")
+    private let filterContext = CIContext(options: nil)
 
     init(storagePaths: StoragePaths) {
         self.storagePaths = storagePaths
@@ -27,7 +31,8 @@ final class EditRenderer {
 
     func exportEdit(
         _ composition: EditComposition,
-        profileId: UUID
+        profileId: UUID,
+        screenScale: CGFloat
     ) async throws -> URL {
         try storagePaths.ensureProfileContainers(profileId: profileId)
         let destinationURL = storagePaths.url(
@@ -43,22 +48,51 @@ final class EditRenderer {
         return try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
-                    let exportSession = try self.makeExportSession(for: composition)
-                    exportSession.outputURL = destinationURL
-                    exportSession.outputFileType = .mp4
+                    let context = try self.makeVideoLabContext(for: composition, screenScale: screenScale)
+                    let filterName = composition.filterName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let needsFilter = (filterName?.isEmpty == false)
+
+                    let exportURL: URL = needsFilter ? self.makeTemporaryURL(extension: "mp4") : destinationURL
+
+                    guard let exportSession = context.videoLab.makeExportSession(
+                        presetName: AVAssetExportPresetHighestQuality,
+                        outputURL: exportURL
+                    ) else {
+                        throw EditRendererError.exportFailed
+                    }
+
                     exportSession.exportAsynchronously {
                         switch exportSession.status {
                         case .completed:
-                            do {
+                            let finalize = {
                                 #if os(iOS)
                                 try? FileManager.default.setAttributes(
                                     [FileAttributeKey.protectionKey: FileProtectionType.complete],
                                     ofItemAtPath: destinationURL.path
                                 )
                                 #endif
+                            }
+
+                            guard needsFilter, let name = filterName, !name.isEmpty else {
+                                finalize()
                                 continuation.resume(returning: destinationURL)
-                            } catch {
-                                continuation.resume(throwing: error)
+                                return
+                            }
+
+                            Task.detached(priority: .userInitiated) {
+                                do {
+                                    try await self.applyFilter(
+                                        filterName: name,
+                                        inputURL: exportURL,
+                                        outputURL: destinationURL
+                                    )
+                                    finalize()
+                                    try? FileManager.default.removeItem(at: exportURL)
+                                    continuation.resume(returning: destinationURL)
+                                } catch {
+                                    try? FileManager.default.removeItem(at: exportURL)
+                                    continuation.resume(throwing: error)
+                                }
                             }
                         case .failed, .cancelled:
                             continuation.resume(throwing: exportSession.error ?? EditRendererError.exportFailed)
@@ -73,133 +107,141 @@ final class EditRenderer {
         }
     }
 
-    private func makeExportSession(for edit: EditComposition) throws -> AVAssetExportSession {
-        let asset = AVAsset(url: edit.clip.sourceURL)
-        let composition = try buildMutableComposition(asset: asset, segment: edit.clip, audioTracks: edit.audioTracks)
-        let videoComposition = try buildVideoComposition(
-            composition: composition,
-            overlays: edit.overlays,
-            filterName: edit.filterName,
-            duration: edit.clip.end - edit.clip.start
-        )
-
-        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
-            throw EditRendererError.exportFailed
+    func makePreviewPlayerItem(for composition: EditComposition, screenScale: CGFloat) async throws -> AVPlayerItem {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    let context = try self.makeVideoLabContext(for: composition, screenScale: screenScale)
+                    let item = context.videoLab.makePlayerItem()
+                    continuation.resume(returning: item)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        exportSession.videoComposition = videoComposition
-        return exportSession
     }
 
-    private func buildMutableComposition(
-        asset: AVAsset,
-        segment: ClipSegment,
-        audioTracks: [AudioTrack]
-    ) throws -> AVMutableComposition {
-        let composition = AVMutableComposition()
-        guard let videoTrack = asset.tracks(withMediaType: .video).first else {
-            throw EditRendererError.trackInsertionFailed
+    private func makeVideoLabContext(for edit: EditComposition, screenScale: CGFloat) throws -> VideoLabContext {
+        let asset = AVURLAsset(url: edit.clip.sourceURL)
+        let clipRange = CMTimeRange(start: edit.clip.start, end: edit.clip.end)
+        guard clipRange.duration > .zero else {
+            throw EditRendererError.invalidClipRange
         }
+        let renderSize = try naturalRenderSize(for: asset)
+        let frameDuration = makeFrameDuration(for: asset)
 
-        let timeRange = CMTimeRange(start: segment.start, end: segment.end)
+        let composition = RenderComposition()
+        composition.renderSize = renderSize
+        composition.frameDuration = frameDuration
 
-        guard
-            let compositionVideoTrack = composition.addMutableTrack(
-                withMediaType: .video,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            )
-        else { throw EditRendererError.trackInsertionFailed }
-
-        try compositionVideoTrack.insertTimeRange(
-            timeRange,
-            of: videoTrack,
-            at: .zero
+        let videoSource = AVAssetSource(asset: asset)
+        videoSource.selectedTimeRange = clipRange
+        let baseLayer = RenderLayer(
+            timeRange: CMTimeRange(start: .zero, duration: clipRange.duration),
+            source: videoSource
         )
-        compositionVideoTrack.preferredTransform = videoTrack.preferredTransform
+        if !edit.videoEffects.isEmpty {
+            baseLayer.operations = edit.videoEffects.compactMap { effect in
+                switch effect.kind {
+                case .zoomBlur:
+                    let operation = ZoomBlur()
+                    operation.blurSize = max(0.0, effect.intensity)
+                    if let center = effect.center {
+                        operation.blurCenter = Position2D(Float(center.x), Float(center.y))
+                    }
+                    return operation
+                case .brightness:
+                    let operation = BrightnessAdjustment()
+                    operation.brightness = effect.intensity
+                    return operation
+                }
+            }
+        }
+        composition.layers = [baseLayer]
 
-        if let originalAudioTrack = asset.tracks(withMediaType: .audio).first,
-           let compositionAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            try compositionAudioTrack.insertTimeRange(timeRange, of: originalAudioTrack, at: .zero)
+        if !edit.overlays.isEmpty {
+            var overlayRoot: CALayer?
+            let semaphore = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                overlayRoot = self.makeOverlayContainer(overlays: edit.overlays, renderSize: renderSize, screenScale: screenScale)
+                semaphore.signal()
+            }
+            semaphore.wait()
+            composition.animationLayer = overlayRoot
         }
 
-        let clipDuration = segment.end - segment.start
-        guard CMTimeCompare(clipDuration, .zero) > 0 else { return composition }
+        if !edit.audioTracks.isEmpty {
+            try appendAudioLayers(
+                to: composition,
+                clipDuration: clipRange.duration,
+                tracks: edit.audioTracks
+            )
+        }
 
-        for audio in audioTracks {
-            guard let url = ResourceLibrary.musicURL(for: audio.resourceName) else {
+        return VideoLabContext(
+            videoLab: VideoLab(renderComposition: composition)
+        )
+    }
+
+    private func appendAudioLayers(
+        to composition: RenderComposition,
+        clipDuration: CMTime,
+        tracks: [AudioTrack]
+    ) throws {
+        for track in tracks {
+            guard let url = ResourceLibrary.musicURL(for: track.resourceName) else {
                 throw EditRendererError.audioResourceMissing
             }
-            let musicAsset = AVAsset(url: url)
-            guard let track = musicAsset.tracks(withMediaType: .audio).first,
-                  let compositionTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-            else { continue }
-            let musicDuration = track.timeRange.duration
-            guard CMTimeCompare(musicDuration, .zero) > 0 else { continue }
+            let audioAsset = AVURLAsset(url: url)
+            let audioDuration = audioAsset.duration
+            guard audioDuration > .zero else { continue }
 
-            let startOffset: CMTime = CMTimeCompare(audio.startOffset, .zero) >= 0 ? audio.startOffset : .zero
-            if CMTimeCompare(clipDuration, startOffset) <= 0 { continue }
+            let startOffset = track.startOffset >= .zero ? track.startOffset : .zero
+            guard startOffset < clipDuration else { continue }
 
-            compositionTrack.preferredVolume = audio.volume
+            var remaining = CMTimeSubtract(clipDuration, startOffset)
+            var currentStart = startOffset
 
-            var insertTime = startOffset
-            var remaining = CMTimeSubtract(clipDuration, insertTime)
+            while remaining > .zero {
+                let segmentDuration = CMTimeCompare(remaining, audioDuration) >= 0 ? audioDuration : remaining
+                let source = AVAssetSource(asset: audioAsset)
+                source.selectedTimeRange = CMTimeRange(start: .zero, duration: segmentDuration)
 
-            while CMTimeCompare(remaining, .zero) > 0 {
-                let chunkDuration = CMTimeCompare(remaining, musicDuration) <= 0 ? remaining : musicDuration
-                if CMTimeCompare(chunkDuration, .zero) <= 0 { break }
-                let timeRange = CMTimeRange(start: .zero, duration: chunkDuration)
-                try compositionTrack.insertTimeRange(timeRange, of: track, at: insertTime)
-                insertTime = CMTimeAdd(insertTime, chunkDuration)
-                remaining = CMTimeSubtract(clipDuration, insertTime)
+                let layer = RenderLayer(
+                    timeRange: CMTimeRange(start: currentStart, duration: segmentDuration),
+                    source: source
+                )
+                layer.audioConfiguration = AudioConfiguration(
+                    pitchAlgorithm: .timeDomain,
+                    volumeRamps: [
+                        VolumeRamp(
+                            startVolume: track.volume,
+                            endVolume: track.volume,
+                            timeRange: CMTimeRange(start: .zero, duration: segmentDuration)
+                        )
+                    ]
+                )
+                layer.layerLevel = 100
+                composition.layers.append(layer)
+
+                currentStart = currentStart + segmentDuration
+                remaining = remaining - segmentDuration
             }
         }
-
-        return composition
     }
 
-    private func buildVideoComposition(
-        composition: AVMutableComposition,
-        overlays: [OverlayItem],
-        filterName: String?,
-        duration: CMTime
-    ) throws -> AVMutableVideoComposition {
-        let videoComposition = AVMutableVideoComposition(asset: composition) { request in
-            var image = request.sourceImage
-            if let filterName, let filter = CIFilter(name: filterName) {
-                filter.setValue(image, forKey: kCIInputImageKey)
-                image = filter.outputImage ?? image
-            }
-            request.finish(with: image, context: nil)
+    private func makeOverlayContainer(overlays: [OverlayItem], renderSize: CGSize, screenScale: CGFloat) -> CALayer? {
+        guard !overlays.isEmpty else { return nil }
+        let parent = CALayer()
+        parent.frame = CGRect(origin: .zero, size: renderSize)
+        parent.masksToBounds = false
+        overlays.forEach { item in
+            parent.addSublayer(makeOverlayLayer(item: item, renderSize: renderSize, screenScale: screenScale))
         }
-        let naturalSize = composition.tracks(withMediaType: .video).first?.naturalSize ?? CGSize(width: 1280, height: 720)
-        videoComposition.renderSize = naturalSize
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
-
-        if !overlays.isEmpty {
-            let parent = CALayer()
-            let videoLayer = CALayer()
-            let overlayLayer = CALayer()
-
-            parent.frame = CGRect(origin: .zero, size: naturalSize)
-            videoLayer.frame = CGRect(origin: .zero, size: naturalSize)
-            overlayLayer.frame = CGRect(origin: .zero, size: naturalSize)
-
-            for item in overlays {
-                overlayLayer.addSublayer(makeOverlayLayer(item: item, renderSize: naturalSize))
-            }
-
-            parent.addSublayer(videoLayer)
-            parent.addSublayer(overlayLayer)
-
-            videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
-                postProcessingAsVideoLayer: videoLayer,
-                in: parent
-            )
-        }
-
-        return videoComposition
+        return parent
     }
 
-    private func makeOverlayLayer(item: OverlayItem, renderSize: CGSize) -> CALayer {
+    private func makeOverlayLayer(item: OverlayItem, renderSize: CGSize, screenScale: CGFloat) -> CALayer {
         let layer = CALayer()
         layer.frame = item.frame
         layer.opacity = 1.0
@@ -218,10 +260,83 @@ final class EditRenderer {
             textLayer.foregroundColor = UIColor(color).cgColor
             textLayer.alignmentMode = .center
             textLayer.frame = layer.bounds
-            textLayer.contentsScale = UIScreen.main.scale
+            textLayer.contentsScale = screenScale
             layer.addSublayer(textLayer)
         }
 
         return layer
     }
+
+    private func applyFilter(filterName: String, inputURL: URL, outputURL: URL) async throws {
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        let asset = AVAsset(url: inputURL)
+        guard let exportSession = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            throw EditRendererError.exportFailed
+        }
+
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.videoComposition = AVVideoComposition(asset: asset) { [filterContext] request in
+            let source = request.sourceImage.clampedToExtent()
+            guard let filtered = FilterPipeline.apply(filterName: filterName, to: source) else {
+                request.finish(with: request.sourceImage, context: filterContext)
+                return
+            }
+            let output = filtered.cropped(to: request.sourceImage.extent)
+            request.finish(with: output, context: filterContext)
+        }
+
+        try await export(session: exportSession)
+    }
+
+    private func export(session: AVAssetExportSession) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            session.exportAsynchronously {
+                switch session.status {
+                case .completed:
+                    continuation.resume()
+                case .failed, .cancelled:
+                    continuation.resume(throwing: session.error ?? EditRendererError.exportFailed)
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    private func naturalRenderSize(for asset: AVAsset) throws -> CGSize {
+        guard let track = asset.tracks(withMediaType: .video).first else {
+            throw EditRendererError.missingVideoTrack
+        }
+        let transformed = track.naturalSize.applying(track.preferredTransform)
+        return CGSize(width: abs(transformed.width), height: abs(transformed.height))
+    }
+
+    private func makeFrameDuration(for asset: AVAsset) -> CMTime {
+        guard let track = asset.tracks(withMediaType: .video).first else {
+            return CMTime(value: 1, timescale: 30)
+        }
+        let nominal = track.nominalFrameRate
+        guard nominal > 0 else {
+            return CMTime(value: 1, timescale: 30)
+        }
+        return CMTime(value: 1, timescale: Int32(nominal.rounded()))
+    }
+
+    private func makeTemporaryURL(extension fileExtension: String) -> URL {
+        let tempBase = FileManager.default.temporaryDirectory
+            .appendingPathComponent("com.mytube.edit-renderer", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        return tempBase.appendingPathComponent(UUID().uuidString).appendingPathExtension(fileExtension)
+    }
+}
+
+private struct VideoLabContext {
+    let videoLab: VideoLab
 }

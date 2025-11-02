@@ -74,7 +74,7 @@ struct MyTubeTests {
         let profileID = UUID()
         let profile = ProfileEntity(context: persistence.viewContext)
         profile.id = profileID
-        profile.name = "Sky"
+        profile.name = "Test Child"
         profile.theme = ThemeDescriptor.ocean.rawValue
         profile.avatarAsset = "avatar.dolphin"
         try persistence.viewContext.save()

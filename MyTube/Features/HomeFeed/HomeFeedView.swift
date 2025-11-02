@@ -12,8 +12,9 @@ struct HomeFeedView: View {
     @EnvironmentObject private var appEnvironment: AppEnvironment
     @StateObject private var viewModel = HomeFeedViewModel()
     @State private var selectedVideo: RankingEngine.RankedVideo?
+    @State private var showingTrustedCreatorsInfo = false
 
-    private let shelfOrder: [RankingEngine.Shelf] = [.forYou, .recent, .calm, .action, .favorites]
+    private let shelfOrder: [RankingEngine.Shelf] = [.forYou, .recent, .action, .favorites]
 
     var body: some View {
         NavigationStack {
@@ -26,7 +27,10 @@ struct HomeFeedView: View {
                 .padding(.horizontal, 24)
                 .padding(.vertical, 32)
             }
-            .background(Color(.systemGroupedBackground))
+            .refreshable {
+                await viewModel.refresh()
+            }
+            .background(KidAppBackground())
             .navigationTitle("For \(appEnvironment.activeProfile.name)")
         }
         .sheet(item: $selectedVideo) { rankedVideo in
@@ -36,8 +40,25 @@ struct HomeFeedView: View {
                 .presentationCornerRadius(32)
                 .presentationSizing(.page)
         }
+        .sheet(
+            item: Binding(
+                get: { viewModel.presentedRemoteVideo },
+                set: { viewModel.presentedRemoteVideo = $0 }
+            )
+        ) { remoteVideo in
+            RemoteVideoPlayerView(video: remoteVideo, environment: appEnvironment)
+                .presentationDetents([.fraction(0.92), .large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(32)
+                .presentationSizing(.page)
+        }
         .onAppear {
             viewModel.bind(to: appEnvironment)
+        }
+        .alert("Add Trusted Creators", isPresented: $showingTrustedCreatorsInfo) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Ask a parent to open Parent Zone → Follow Connections to add or approve trusted creators.")
         }
     }
 
@@ -57,11 +78,37 @@ struct HomeFeedView: View {
     }
 
     private var sharedSection: some View {
-        Group {
-            if !viewModel.sharedVideos.isEmpty {
-                SharedShelfView(videos: viewModel.sharedVideos)
+        VStack(alignment: .leading, spacing: 24) {
+            if viewModel.sharedSections.isEmpty {
+                Text("No videos from trusted creators yet.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("From Trusted Creators")
+                    .font(.title2.bold())
+                ForEach(viewModel.sharedSections) { section in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(section.ownerDisplayName)
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(spacing: 16) {
+                                ForEach(section.videos) { item in
+                                    RemoteVideoCard(
+                                        video: item,
+                                        image: loadRemoteThumbnail(for: item.video),
+                                        onTap: { viewModel.handleRemoteVideoTap(item) }
+                                    )
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
             }
+            addTrustedCreatorsButton
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var shelvesSection: some View {
@@ -90,12 +137,32 @@ struct HomeFeedView: View {
         let url = appEnvironment.videoLibrary.thumbnailFileURL(for: video)
         return UIImage(contentsOfFile: url.path)
     }
+
+    private func loadRemoteThumbnail(for video: RemoteVideoModel) -> UIImage? {
+        guard let url = video.localThumbURL(root: appEnvironment.storagePaths.rootURL) else {
+            return nil
+        }
+        return UIImage(contentsOfFile: url.path)
+    }
+
+    private var addTrustedCreatorsButton: some View {
+        Button {
+            showingTrustedCreatorsInfo = true
+        } label: {
+            Label("Add More Trusted Creators", systemImage: "person.2.badge.plus")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(KidPrimaryButtonStyle())
+    }
 }
 
 private struct HeroCard: View {
+    @EnvironmentObject private var appEnvironment: AppEnvironment
     let video: VideoModel
     let image: UIImage?
     let onTap: () -> Void
+
+    private var appAccent: Color { appEnvironment.activeProfile.theme.kidPalette.accent }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -119,6 +186,10 @@ private struct HeroCard: View {
                     .frame(maxWidth: .infinity, minHeight: 300)
                     .clipped()
                     .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(appAccent.opacity(0.25), lineWidth: 1)
+                    )
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Hero Pick")
@@ -141,9 +212,9 @@ private struct HeroCard: View {
             .buttonStyle(.plain)
 
             HStack(spacing: 24) {
-                MetricChip(label: "Plays", value: "\(video.playCount)")
-                MetricChip(label: "Completion", value: percentage(video.completionRate))
-                MetricChip(label: "Replay", value: percentage(video.replayRate))
+                ThemedMetricChip(label: "Plays", value: "\(video.playCount)", accent: appAccent)
+                ThemedMetricChip(label: "Completion", value: percentage(video.completionRate), accent: appAccent)
+                ThemedMetricChip(label: "Replay", value: percentage(video.replayRate), accent: appAccent)
             }
         }
     }
@@ -153,18 +224,27 @@ private struct HeroCard: View {
     }
 }
 
-private struct MetricChip: View {
+private struct ThemedMetricChip: View {
     let label: String
     let value: String
+    let accent: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 10) {
             Text(label.uppercased())
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.9))
             Text(value)
                 .font(.headline)
+                .foregroundStyle(.white)
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Capsule(style: .continuous)
+                .fill(LinearGradient(colors: [accent, accent.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        )
+        .shadow(color: accent.opacity(0.2), radius: 6, y: 3)
     }
 }
 
@@ -195,9 +275,12 @@ private struct ShelfView: View {
 }
 
 private struct VideoCard: View {
+    @EnvironmentObject private var appEnvironment: AppEnvironment
     let video: VideoModel
     let image: UIImage?
     let onTap: () -> Void
+
+    private var appAccent: Color { appEnvironment.activeProfile.theme.kidPalette.accent }
 
     var body: some View {
         Button(action: onTap) {
@@ -220,6 +303,10 @@ private struct VideoCard: View {
                     }
                     .frame(width: 220, height: 130)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(appAccent.opacity(0.25), lineWidth: 1)
+                    )
 
                     if video.liked {
                         Image(systemName: "heart.fill")
@@ -243,103 +330,180 @@ private struct VideoCard: View {
     }
 }
 
-private struct SharedShelfView: View {
-    let videos: [RemoteVideoModel]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Shared With You")
-                .font(.title2.bold())
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 16) {
-                    ForEach(videos) { video in
-                        RemoteVideoCard(video: video)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-        }
-    }
-}
-
 private struct RemoteVideoCard: View, Identifiable {
-    let video: RemoteVideoModel
+    @EnvironmentObject private var appEnvironment: AppEnvironment
+    let video: HomeFeedViewModel.SharedRemoteVideo
+    let image: UIImage?
+    let onTap: () -> Void
 
     var id: String { video.id }
 
+    private var appAccent: Color { appEnvironment.activeProfile.theme.kidPalette.accent }
+
     private var formattedDuration: String {
         let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = video.duration >= 3600 ? [.hour, .minute, .second] : [.minute, .second]
+        formatter.allowedUnits = video.video.duration >= 3600 ? [.hour, .minute, .second] : [.minute, .second]
         formatter.unitsStyle = .positional
         formatter.zeroFormattingBehavior = .pad
-        return formatter.string(from: video.duration) ?? "--:--"
+        return formatter.string(from: video.video.duration) ?? "--:--"
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.orange.opacity(0.18))
-                .overlay(
-                    VStack(alignment: .leading, spacing: 8) {
-                        Image(systemName: "cloud.fill")
-                            .font(.system(size: 40))
-                            .foregroundStyle(.orange)
-                        Text(video.title)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
-                        Text("From \(video.ownerChild)")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                        HStack(spacing: 12) {
-                            Label(formattedDuration, systemImage: "clock")
-                            Label {
-                                Text(video.createdAt, style: .date)
-                            } icon: {
-                                Image(systemName: "calendar")
-                            }
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        Spacer()
-                        Label("Status: \(video.status.capitalized)", systemImage: statusIcon)
-                            .font(.caption)
-                            .foregroundStyle(statusColor)
-                    }
-                    .padding(16)
-                )
-                .frame(width: 240, height: 180)
-
-            Text("Open Parent Zone to approve & download.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 240, alignment: .leading)
-        }
-    }
+    private var status: RemoteVideoModel.Status { video.video.statusValue }
 
     private var statusIcon: String {
-        switch video.status {
-        case "available":
+        switch status {
+        case .available:
+            return "arrow.down.circle"
+        case .downloading:
+            return "arrow.triangle.2.circlepath"
+        case .downloaded:
             return "checkmark.seal.fill"
-        case "revoked":
+        case .failed:
+            return "xmark.octagon.fill"
+        case .revoked:
             return "exclamationmark.triangle.fill"
-        case "deleted":
+        case .deleted:
             return "trash.fill"
-        default:
-            return "info.circle.fill"
         }
     }
 
     private var statusColor: Color {
-        switch video.status {
-        case "available":
-            return .green
-        case "revoked":
+        switch status {
+        case .available:
             return .orange
-        case "deleted":
+        case .downloading:
+            return .orange
+        case .downloaded:
+            return .green
+        case .failed:
             return .red
-        default:
-            return .secondary
+        case .revoked:
+            return .orange
+        case .deleted:
+            return .red
+        }
+    }
+
+    private var actionMessage: String {
+        switch status {
+        case .available:
+            return "Tap to download and watch."
+        case .downloading:
+            return "Downloading…"
+        case .downloaded:
+            return "Ready to watch."
+        case .failed:
+            return "Tap to retry download."
+        case .revoked:
+            return "Share revoked by sender."
+        case .deleted:
+            return "Video deleted by sender."
+        }
+    }
+
+    private var isActionable: Bool {
+        switch status {
+        case .available, .failed, .downloaded:
+            return true
+        case .downloading, .revoked, .deleted:
+            return false
+        }
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 12) {
+                ZStack {
+                    Group {
+                        if let image {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(16 / 9, contentMode: .fill)
+                                .frame(width: 240, height: 140)
+                                .clipped()
+                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        } else {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color.orange.opacity(0.18))
+                                .frame(width: 240, height: 140)
+                                .overlay(
+                                    Image(systemName: "cloud.fill")
+                                        .font(.system(size: 40))
+                                        .foregroundStyle(.orange.opacity(0.8))
+                                )
+                        }
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(
+                                status == .downloaded ? Color.green.opacity(0.6) : appAccent.opacity(0.25),
+                                lineWidth: 1
+                            )
+                    )
+
+                    if status == .downloading {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(appAccent)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(video.video.title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    Text("From \(video.ownerDisplayName)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        Label(formattedDuration, systemImage: "clock")
+                        Label {
+                            Text(video.video.createdAt, style: .date)
+                        } icon: {
+                            Image(systemName: "calendar")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                    Label(statusLabel, systemImage: statusIcon)
+                        .font(.caption)
+                        .foregroundStyle(statusColor)
+
+                    if let error = video.video.downloadError, status == .failed {
+                        Text(error)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+
+                    Text(actionMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 240, alignment: .leading)
+            }
+            .padding(.vertical, 4)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isActionable)
+        .opacity(isActionable ? 1.0 : 0.6)
+    }
+
+    private var statusLabel: String {
+        switch status {
+        case .available:
+            return "Available"
+        case .downloading:
+            return "Downloading"
+        case .downloaded:
+            return "Downloaded"
+        case .failed:
+            return "Failed"
+        case .revoked:
+            return "Revoked"
+        case .deleted:
+            return "Deleted"
         }
     }
 }
@@ -358,9 +522,10 @@ private struct EmptyStateView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(48)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color.secondary.opacity(0.1))
-        )
+        .kidCardBackground()
     }
+}
+
+private extension HomeFeedView {
+    var appAccent: Color { appEnvironment.activeProfile.theme.kidPalette.accent }
 }

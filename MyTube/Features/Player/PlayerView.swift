@@ -47,7 +47,7 @@ struct PlayerView: View {
             Spacer()
         }
         .padding(32)
-        .background(Color(.systemGroupedBackground))
+        .background(KidAppBackground())
         .onAppear { viewModel.onAppear() }
         .onDisappear { viewModel.onDisappear() }
     }
@@ -61,8 +61,7 @@ private struct ControlButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .frame(width: 56, height: 56)
-                .background(.regularMaterial, in: Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(KidCircleIconButtonStyle())
     }
 }

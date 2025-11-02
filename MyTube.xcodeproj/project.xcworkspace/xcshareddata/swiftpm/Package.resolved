@@ -1,0 +1,24 @@
+{
+  "originHash" : "fabba834a56d4aab35e31ae00bcd7585080e82814892b338c0ff052e900f2e59",
+  "pins" : [
+    {
+      "identity" : "nostr-sdk-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/rust-nostr/nostr-sdk-swift.git",
+      "state" : {
+        "revision" : "2b7ffd8f4337db7d4d87d324ad7e9321a78dd703",
+        "version" : "0.43.1"
+      }
+    },
+    {
+      "identity" : "swift-crypto",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-crypto.git",
+      "state" : {
+        "revision" : "60f13f60c4d093691934dc6cfdf5f508ada1f894",
+        "version" : "2.6.0"
+      }
+    }
+  ],
+  "version" : 3
+}

@@ -11,7 +11,6 @@ struct RankingEngine {
     enum Shelf: String, CaseIterable, Hashable {
         case forYou = "For You"
         case recent = "Recent"
-        case calm = "Calm"
         case action = "Action"
         case favorites = "Favorites"
     }
@@ -50,7 +49,6 @@ struct RankingEngine {
         let shelves: [Shelf: [RankedVideo]] = [
             .forYou: explored,
             .recent: sortedByRecency(videos),
-            .calm: filtered(videos, where: { $0.loudness < 0.4 }),
             .action: filtered(videos, where: { $0.loudness >= 0.4 }),
             .favorites: filtered(videos, where: { $0.liked })
         ]

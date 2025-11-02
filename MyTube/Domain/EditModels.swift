@@ -65,21 +65,48 @@ struct AudioTrack: Identifiable, Hashable {
     }
 }
 
+enum VideoEffectKind: String, Hashable {
+    case zoomBlur
+    case brightness
+}
+
+struct VideoEffect: Identifiable, Hashable {
+    let id: UUID
+    var kind: VideoEffectKind
+    var intensity: Float
+    var center: CGPoint?
+
+    init(
+        id: UUID = UUID(),
+        kind: VideoEffectKind,
+        intensity: Float,
+        center: CGPoint? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.intensity = intensity
+        self.center = center
+    }
+}
+
 struct EditComposition: Hashable {
     var clip: ClipSegment
     var overlays: [OverlayItem]
     var audioTracks: [AudioTrack]
     var filterName: String?
+    var videoEffects: [VideoEffect]
 
     init(
         clip: ClipSegment,
         overlays: [OverlayItem] = [],
         audioTracks: [AudioTrack] = [],
-        filterName: String? = nil
+        filterName: String? = nil,
+        videoEffects: [VideoEffect] = []
     ) {
         self.clip = clip
         self.overlays = overlays
         self.audioTracks = audioTracks
         self.filterName = filterName
+        self.videoEffects = videoEffects
     }
 }

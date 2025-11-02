@@ -11,53 +11,31 @@ import Foundation
 final class PersistenceController {
     static let shared = PersistenceController()
 
-    let container: NSPersistentContainer
+    private(set) var container: NSPersistentContainer
+    private let isInMemory: Bool
+    private let storeURLOverride: URL?
 
     var viewContext: NSManagedObjectContext {
         container.viewContext
     }
 
     init(inMemory: Bool = false, storeURL: URL? = nil) {
-        container = NSPersistentContainer(name: "MyTube")
-
-        let description: NSPersistentStoreDescription
-        if let existingDescription = container.persistentStoreDescriptions.first {
-            description = existingDescription
-        } else {
-            description = NSPersistentStoreDescription()
-            container.persistentStoreDescriptions = [description]
-        }
-
-        if inMemory {
-            description.url = URL(fileURLWithPath: "/dev/null")
-        } else if let storeURL {
-            description.url = storeURL
-        } else {
-            description.url = Self.defaultStoreURL()
-        }
-
-        description.shouldAddStoreAsynchronously = false
-        description.setOption(
-            FileProtectionType.complete as NSObject,
-            forKey: NSPersistentStoreFileProtectionKey
-        )
-        description.shouldMigrateStoreAutomatically = true
-        description.shouldInferMappingModelAutomatically = true
-        description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
-
-        container.loadPersistentStores { _, error in
-            if let error {
-                fatalError("Failed to load persistent stores: \(error)")
-            }
-        }
-
-        configureContexts()
+        self.isInMemory = inMemory
+        self.storeURLOverride = storeURL
+        container = PersistenceController.buildContainer(inMemory: inMemory, storeURL: storeURL)
+        configureContexts(on: container)
     }
 
     static func preview() -> PersistenceController {
         let controller = PersistenceController(inMemory: true)
         SampleDataSeeder(context: controller.viewContext).seed()
         return controller
+    }
+
+    func resetStores() throws {
+        try destroyPersistentStores()
+        container = PersistenceController.buildContainer(inMemory: isInMemory, storeURL: storeURLOverride)
+        configureContexts(on: container)
     }
 
     func newBackgroundContext() -> NSManagedObjectContext {
@@ -75,7 +53,15 @@ final class PersistenceController {
         }
     }
 
-    private func configureContexts() {
+    private func destroyPersistentStores() throws {
+        let coordinator = container.persistentStoreCoordinator
+        for store in coordinator.persistentStores {
+            guard let url = store.url else { continue }
+            try coordinator.destroyPersistentStore(at: url, ofType: store.type, options: nil)
+        }
+    }
+
+    private func configureContexts(on container: NSPersistentContainer) {
         viewContext.automaticallyMergesChangesFromParent = true
         viewContext.mergePolicy = NSMergeByPropertyStoreTrumpMergePolicy
         viewContext.transactionAuthor = "main"
@@ -104,6 +90,43 @@ final class PersistenceController {
 
         return myTubeDirectory.appendingPathComponent(storeName, isDirectory: false)
     }
+
+    private static func buildContainer(inMemory: Bool, storeURL: URL?) -> NSPersistentContainer {
+        let container = NSPersistentContainer(name: "MyTube")
+
+        let description: NSPersistentStoreDescription
+        if let existingDescription = container.persistentStoreDescriptions.first {
+            description = existingDescription
+        } else {
+            description = NSPersistentStoreDescription()
+            container.persistentStoreDescriptions = [description]
+        }
+
+        if inMemory {
+            description.url = URL(fileURLWithPath: "/dev/null")
+        } else if let storeURL {
+            description.url = storeURL
+        } else {
+            description.url = defaultStoreURL()
+        }
+
+        description.shouldAddStoreAsynchronously = false
+        description.setOption(
+            FileProtectionType.complete as NSObject,
+            forKey: NSPersistentStoreFileProtectionKey
+        )
+        description.shouldMigrateStoreAutomatically = true
+        description.shouldInferMappingModelAutomatically = true
+        description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+
+        container.loadPersistentStores { _, error in
+            if let error {
+                fatalError("Failed to load persistent stores: \(error)")
+            }
+        }
+
+        return container
+    }
 }
 
 /// Seeds a small set of data for previews and UI tests.
@@ -119,8 +142,8 @@ struct SampleDataSeeder {
 
         let profile = ProfileEntity(context: context)
         profile.id = UUID()
-        profile.name = "Sky"
-        profile.theme = "Ocean"
+        profile.name = "Sample Kid"
+        profile.theme = ThemeDescriptor.ocean.rawValue
         profile.avatarAsset = "avatar.dolphin"
 
         let video = VideoEntity(context: context)

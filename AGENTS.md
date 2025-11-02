@@ -4,8 +4,9 @@
 MyTube is organized as an iPad-first SwiftUI app. Source lives in `MyTube/` with top-level files like `AppEnvironment.swift`, `PersistenceController.swift`, and `StoragePaths.swift`. Feature-specific code sits under `MyTube/Features/` (e.g., `HomeFeed/`, `Player/`, `Capture/`, `Editor/`, `ParentZone/`). Domain logic (`RankingEngine.swift`, `EditModels.swift`, `FilterPipeline.swift`) resides in `MyTube/Domain/`, and service abstractions (`VideoLibrary.swift`, `Thumbnailer.swift`, `EditRenderer.swift`, `ParentAuth.swift`) in `MyTube/Services/`. Shared UI components align under `MyTube/SharedUI/`. Media assets (stickers, LUTs, music) belong in `Resources/`. Unit and UI tests should mirror this structure under `MyTubeTests/` and `MyTubeUITests/`.
 
 ## Build, Test, and Development Commands
-- `xcodebuild -scheme MyTube -destination 'platform=iOS Simulator,name=iPad (10th generation)' build`: compile the app with all targets.
-- `xcodebuild test -scheme MyTube -destination 'platform=iOS Simulator,name=iPad (10th generation)'`: execute XCTest suites for unit and UI layers.
+- **Always target** `iPad mini (A17 Pro)` for simulator work:
+  - `xcodebuild -scheme MyTube -destination 'platform=iOS Simulator,name=iPad mini (A17 Pro)' build`
+  - `xcodebuild test -scheme MyTube -destination 'platform=iOS Simulator,name=iPad mini (A17 Pro)'`
 - `swift run swiftlint` (optional): verify linting before submitting changes.
 - `xcrun simctl addmedia booted path/to/video.mp4`: preload sample videos for local testing.
 

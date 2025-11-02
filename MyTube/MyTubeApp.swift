@@ -16,6 +16,7 @@ struct MyTubeApp: App {
             AppRootView()
                 .environmentObject(environment)
                 .environment(\.managedObjectContext, environment.persistence.viewContext)
+                .preferredColorScheme(.light)
         }
     }
 }

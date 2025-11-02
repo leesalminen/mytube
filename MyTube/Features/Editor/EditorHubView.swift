@@ -42,6 +42,8 @@ struct EditorHubView: View {
             .buttonStyle(.plain)
         }
         .navigationTitle("Editor")
+        .scrollContentBackground(.hidden)
+        .background(KidAppBackground())
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button(action: viewModel.loadVideos) {
@@ -90,6 +92,10 @@ private struct ThumbnailView: View {
         }
         .frame(width: 120, height: 80)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.25), lineWidth: 1)
+        )
     }
 }
 

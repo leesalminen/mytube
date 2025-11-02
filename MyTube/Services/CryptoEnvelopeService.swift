@@ -5,8 +5,16 @@
 //  Created by Codex on 10/28/25.
 //
 
+#if canImport(Crypto)
+import Crypto
+import _CryptoExtras
+typealias SHA256 = Crypto.SHA256
+#else
 import CryptoKit
+typealias SHA256 = CryptoKit.SHA256
+#endif
 import Foundation
+import NostrSDK
 
 enum CryptoEnvelopeError: Error {
     case algorithmUnavailable
@@ -47,9 +55,6 @@ final class CryptoEnvelopeService {
         static let mediaAlgorithm = "xchacha20poly1305_v1"
         static let wrapAlgorithm = "x25519-hkdf-chacha20poly1305_v1"
         static let wrapInfo = Data("mytube:wrap:Vk:v1".utf8)
-        static let dmInfo = Data("mytube:nip44:v1".utf8)
-        static let dmSalt = Data()
-        static let dmVersion: UInt8 = 1
         static let chachaTagLength = 16
         static let xchachaNonceLength = 24
         static let wrapSaltLength = 32
@@ -67,6 +72,9 @@ final class CryptoEnvelopeService {
         return key
     }
 
+    var mediaAlgorithmIdentifier: String { Constants.mediaAlgorithm }
+    var wrapAlgorithmIdentifier: String { Constants.wrapAlgorithm }
+
     func generateNonce(length: Int) throws -> Data {
         var nonce = Data(count: length)
         let status = nonce.withUnsafeMutableBytes { pointer in
@@ -76,6 +84,19 @@ final class CryptoEnvelopeService {
             throw CryptoEnvelopeError.encryptionFailed
         }
         return nonce
+    }
+
+    func generateSigningKeyPair() throws -> (privateKey: Data, publicKeyXOnly: Data, publicKeyParity: UInt8) {
+        let keys = NostrSDK.Keys.generate()
+        let secretHex = keys.secretKey().toHex()
+        let publicHex = keys.publicKey().toHex()
+        guard
+            let secretData = Data(hexString: secretHex),
+            let publicData = Data(hexString: publicHex)
+        else {
+            throw CryptoEnvelopeError.algorithmUnavailable
+        }
+        return (secretData, publicData, 0)
     }
 
     func encryptMedia(_ data: Data, key: Data) throws -> EncryptedMediaPayload {
@@ -177,89 +198,42 @@ final class CryptoEnvelopeService {
 
     func encryptDirectMessage(
         _ payload: Data,
-        senderPrivateKey: Curve25519.Signing.PrivateKey,
-        receiverPublicKey: Data
-    ) throws -> Data {
-        let sharedKey = try deriveSharedSecret(
-            privateKeyData: senderPrivateKey.rawRepresentation,
-            peerPublicKeyData: receiverPublicKey
-        )
+        senderPrivateKeyData: Data,
+        recipientPublicKeyXOnly: Data
+    ) throws -> String {
+        guard let plaintext = String(data: payload, encoding: .utf8) else {
+            throw CryptoEnvelopeError.encryptionFailed
+        }
 
-        let nonce = try generateNonce(length: Constants.xchachaNonceLength)
-        let sealed = try XChaCha20Poly1305.seal(
-            message: payload,
-            key: sharedKey,
-            nonce: nonce,
-            authenticatedData: nil
-        )
+        let senderSecretKey = try NostrSDK.SecretKey.fromBytes(bytes: senderPrivateKeyData)
+        let recipientPublicKey = try NostrSDK.PublicKey.fromBytes(bytes: recipientPublicKeyXOnly)
 
-        var frame = Data(capacity: 1 + nonce.count + sealed.ciphertext.count + sealed.tag.count)
-        frame.append(Constants.dmVersion)
-        frame.append(nonce)
-        frame.append(sealed.ciphertext)
-        frame.append(sealed.tag)
-        return frame
+        return try nip44Encrypt(secretKey: senderSecretKey, publicKey: recipientPublicKey, content: plaintext, version: .v2)
     }
 
     func decryptDirectMessage(
-        _ payload: Data,
-        recipientPrivateKey: Curve25519.Signing.PrivateKey,
-        senderPublicKey: Data
+        _ payload: String,
+        recipientPrivateKeyData: Data,
+        senderPublicKeyXOnly: Data
     ) throws -> Data {
-        guard payload.count > 1 + Constants.xchachaNonceLength + Constants.chachaTagLength else {
+        let recipientSecretKey = try NostrSDK.SecretKey.fromBytes(bytes: recipientPrivateKeyData)
+        let senderPublicKey = try NostrSDK.PublicKey.fromBytes(bytes: senderPublicKeyXOnly)
+
+        let plaintext = try nip44Decrypt(secretKey: recipientSecretKey, publicKey: senderPublicKey, payload: payload)
+        guard let data = plaintext.data(using: .utf8) else {
             throw CryptoEnvelopeError.decryptionFailed
         }
-        guard payload.first == Constants.dmVersion else {
-            throw CryptoEnvelopeError.decryptionFailed
-        }
-
-        let nonceRange = 1 ..< (1 + Constants.xchachaNonceLength)
-        let nonce = payload[nonceRange]
-
-        let ciphertextAndTag = payload[(1 + Constants.xchachaNonceLength)...]
-        guard ciphertextAndTag.count >= Constants.chachaTagLength else {
-            throw CryptoEnvelopeError.decryptionFailed
-        }
-        let tagStart = ciphertextAndTag.count - Constants.chachaTagLength
-        let ciphertext = ciphertextAndTag.prefix(tagStart)
-        let tag = ciphertextAndTag.suffix(Constants.chachaTagLength)
-
-        let sharedKey = try deriveSharedSecret(
-            privateKeyData: recipientPrivateKey.rawRepresentation,
-            peerPublicKeyData: senderPublicKey
-        )
-
-        return try XChaCha20Poly1305.open(
-            ciphertext: ciphertext,
-            tag: tag,
-            key: sharedKey,
-            nonce: Data(nonce),
-            authenticatedData: nil
-        )
+        return data
     }
 
-    private func deriveSharedSecret(privateKeyData: Data, peerPublicKeyData: Data) throws -> Data {
-        let privateRaw: Data
-        switch privateKeyData.count {
-        case 32:
-            privateRaw = privateKeyData
-        case 64:
-            privateRaw = privateKeyData.prefix(32)
-        default:
-            throw CryptoEnvelopeError.algorithmUnavailable
-        }
 
-        let agreementPrivate = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateRaw)
-        let agreementPublic = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: peerPublicKeyData)
-        let sharedSecret = try agreementPrivate.sharedSecretFromKeyAgreement(with: agreementPublic)
-        let symmetric = sharedSecret.hkdfDerivedSymmetricKey(
-            using: SHA256.self,
-            salt: Constants.dmSalt,
-            sharedInfo: Constants.dmInfo,
-            outputByteCount: 32
-        )
-        return symmetric.withUnsafeBytes { Data($0) }
-    }
+
+
+
+
+
+
+
 }
 
 // MARK: - XChaCha20-Poly1305 Helper

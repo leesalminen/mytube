@@ -34,6 +34,9 @@ final class CaptureViewModel: NSObject, ObservableObject {
     private var minZoomFactor: CGFloat = 1.0
     private var maxZoomFactor: CGFloat = 6.0
     private var orientationObserver: NSObjectProtocol?
+#if targetEnvironment(simulator)
+    private var simulatedRecordingTask: Task<Void, Never>?
+#endif
 
     init(environment: AppEnvironment) {
         self.environment = environment
@@ -54,12 +57,24 @@ final class CaptureViewModel: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(observer)
         }
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
+#if targetEnvironment(simulator)
+        simulatedRecordingTask?.cancel()
+#endif
     }
 
     func startSession() {
         isSessionReady = false
         showSavedBanner = false
         errorMessage = nil
+
+#if targetEnvironment(simulator)
+        isTorchAvailable = false
+        isTorchEnabled = false
+        currentZoomFactor = 1.0
+        currentCameraPosition = .back
+        isSessionReady = true
+        return
+#endif
 
         Task {
             guard await requestPermissions() else {
@@ -89,6 +104,14 @@ final class CaptureViewModel: NSObject, ObservableObject {
     }
 
     func stopSession() {
+#if targetEnvironment(simulator)
+        simulatedRecordingTask?.cancel()
+        simulatedRecordingTask = nil
+        stopTimer()
+        isRecording = false
+        isSessionReady = false
+        return
+#endif
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if self.session.isRunning {
@@ -107,6 +130,15 @@ final class CaptureViewModel: NSObject, ObservableObject {
             return
         }
 
+#if targetEnvironment(simulator)
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+        return
+#endif
+
         if isRecording {
             stopRecording()
         } else {
@@ -115,6 +147,10 @@ final class CaptureViewModel: NSObject, ObservableObject {
     }
 
     func switchCamera() {
+#if targetEnvironment(simulator)
+        currentCameraPosition = currentCameraPosition == .back ? .front : .back
+        return
+#endif
         guard !isRecording else { return }
         isSessionReady = false
         sessionQueue.async { [weak self] in
@@ -139,6 +175,10 @@ final class CaptureViewModel: NSObject, ObservableObject {
     }
 
     func toggleTorch() {
+#if targetEnvironment(simulator)
+        errorMessage = "Torch not available in the simulator."
+        return
+#endif
         sessionQueue.async { [weak self] in
             guard let self, let device = self.currentVideoDevice, device.hasTorch, self.currentCameraPosition == .back else {
                 DispatchQueue.main.async { [weak self] in
@@ -230,6 +270,10 @@ final class CaptureViewModel: NSObject, ObservableObject {
     }
 
     private func startRecording() {
+#if targetEnvironment(simulator)
+        startSimulatedRecording()
+        return
+#endif
         sessionQueue.async { [weak self] in
             guard let self else { return }
             guard self.session.isRunning else {
@@ -261,6 +305,10 @@ final class CaptureViewModel: NSObject, ObservableObject {
     }
 
     private func stopRecording() {
+#if targetEnvironment(simulator)
+        stopSimulatedRecording()
+        return
+#endif
         sessionQueue.async { [weak self] in
             guard let self else { return }
             if self.movieOutput.isRecording {
@@ -396,6 +444,178 @@ final class CaptureViewModel: NSObject, ObservableObject {
         durationTimer = nil
     }
 }
+
+#if targetEnvironment(simulator)
+private extension CaptureViewModel {
+    func startSimulatedRecording() {
+        guard !isRecording else { return }
+
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+        try? FileManager.default.removeItem(at: tempURL)
+
+        isRecording = true
+        recordDuration = 0
+        startTimer()
+
+        simulatedRecordingTask?.cancel()
+        simulatedRecordingTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await SimulatedCapture.generateBlankVideo(
+                    to: tempURL,
+                    duration: 2.0,
+                    size: CGSize(width: 1280, height: 720),
+                    framesPerSecond: 30
+                )
+                try Task.checkCancellation()
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.simulatedRecordingTask = nil
+                    self.isRecording = false
+                    self.stopTimer()
+                    self.handleRecordingCompletion(at: tempURL)
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: tempURL)
+                if error is CancellationError { return }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.simulatedRecordingTask = nil
+                    self.isRecording = false
+                    self.stopTimer()
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func stopSimulatedRecording() {
+        simulatedRecordingTask?.cancel()
+        simulatedRecordingTask = nil
+        stopTimer()
+        isRecording = false
+    }
+}
+
+private enum SimulatedCaptureError: Error {
+    case cannotStartWriter
+    case pixelBufferCreationFailed
+}
+
+private enum SimulatedCapture {
+    static func generateBlankVideo(
+        to url: URL,
+        duration: TimeInterval,
+        size: CGSize,
+        framesPerSecond fps: Int32
+    ) async throws {
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(size.width),
+            AVVideoHeightKey: Int(size.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 5_000_000,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+                kCVPixelBufferWidthKey as String: Int(size.width),
+                kCVPixelBufferHeightKey as String: Int(size.height)
+            ]
+        )
+
+        guard writer.canAdd(input) else { throw SimulatedCaptureError.cannotStartWriter }
+        writer.add(input)
+
+        guard writer.startWriting() else {
+            throw writer.error ?? SimulatedCaptureError.cannotStartWriter
+        }
+        writer.startSession(atSourceTime: .zero)
+
+        let totalFrames = max(1, Int(duration * Double(fps)))
+        let frameDuration = CMTime(value: 1, timescale: fps)
+        var presentationTime = CMTime.zero
+        let colors: [(UInt8, UInt8, UInt8)] = [
+            (0x20, 0x3A, 0x6D),
+            (0x53, 0x9B, 0xF5)
+        ]
+
+        for frame in 0..<totalFrames {
+            try Task.checkCancellation()
+            while !input.isReadyForMoreMediaData {
+                try Task.checkCancellation()
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+
+            guard let buffer = createPixelBuffer(width: Int(size.width), height: Int(size.height)) else {
+                throw SimulatedCaptureError.pixelBufferCreationFailed
+            }
+            fill(pixelBuffer: buffer, with: colors[frame % colors.count])
+            adaptor.append(buffer, withPresentationTime: presentationTime)
+            presentationTime = CMTimeAdd(presentationTime, frameDuration)
+        }
+
+        input.markAsFinished()
+        await withCheckedContinuation { continuation in
+            writer.finishWriting {
+                continuation.resume()
+            }
+        }
+        if let error = writer.error {
+            throw error
+        }
+    }
+
+    private static func createPixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
+        var buffer: CVPixelBuffer?
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferPixelFormatTypeKey: Int(kCVPixelFormatType_32BGRA),
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height
+        ]
+        CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            kCVPixelFormatType_32BGRA,
+            attributes as CFDictionary,
+            &buffer
+        )
+        return buffer
+    }
+
+    private static func fill(pixelBuffer: CVPixelBuffer, with color: (UInt8, UInt8, UInt8)) {
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+
+        let buffer = baseAddress.assumingMemoryBound(to: UInt8.self)
+
+        for y in 0..<height {
+            let row = buffer + y * bytesPerRow
+            for x in 0..<width {
+                let offset = x * 4
+                row[offset + 0] = color.2
+                row[offset + 1] = color.1
+                row[offset + 2] = color.0
+                row[offset + 3] = 0xFF
+            }
+        }
+    }
+}
+#endif
 
 extension CaptureViewModel: AVCaptureFileOutputRecordingDelegate {
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {

@@ -28,15 +28,9 @@ struct FilterPipeline {
 
         let ciImage = CIImage(cvPixelBuffer: sampleBuffer)
 
-        if let output = applyLUTIfNeeded(name: filterName, image: ciImage) {
-            return render(image: output)
+        guard let outputImage = FilterPipeline.apply(filterName: filterName, to: ciImage) else {
+            return sampleBuffer
         }
-
-        guard let filter = CIFilter(name: filterName) else { return sampleBuffer }
-        FilterPipeline.presetConfiguration[filterName]?(filter)
-        filter.setValue(ciImage, forKey: kCIInputImageKey)
-
-        guard let outputImage = filter.outputImage else { return sampleBuffer }
 
         return render(image: outputImage)
     }
@@ -80,9 +74,30 @@ struct FilterPipeline {
         }
     }
 
-    private func applyLUTIfNeeded(name: String, image: CIImage) -> CIImage? {
-        guard name.hasPrefix("lut://") else { return nil }
-        let resourceName = String(name.dropFirst("lut://".count))
+    private static let presetConfiguration: [String: (CIFilter) -> Void] = {
+        var map: [String: (CIFilter) -> Void] = [:]
+        for descriptor in FilterPipeline.presets() {
+            map[descriptor.id] = descriptor.configuration
+        }
+        return map
+    }()
+
+    static func apply(filterName: String, to image: CIImage) -> CIImage? {
+        guard !filterName.isEmpty else { return nil }
+
+        if let lutImage = applyLUT(filterName: filterName, to: image) {
+            return lutImage
+        }
+
+        guard let filter = CIFilter(name: filterName) else { return nil }
+        presetConfiguration[filterName]?(filter)
+        filter.setValue(image, forKey: kCIInputImageKey)
+        return filter.outputImage
+    }
+
+    private static func applyLUT(filterName: String, to image: CIImage) -> CIImage? {
+        guard filterName.hasPrefix("lut://") else { return nil }
+        let resourceName = String(filterName.dropFirst("lut://".count))
         guard let lut = LUTCache.shared.lutData(named: resourceName) else { return nil }
 
         guard let filter = CIFilter(name: "CIColorCube") else { return nil }
@@ -91,16 +106,6 @@ struct FilterPipeline {
         filter.setValue(image, forKey: kCIInputImageKey)
         return filter.outputImage
     }
-}
-
-private extension FilterPipeline {
-    static let presetConfiguration: [String: (CIFilter) -> Void] = {
-        var map: [String: (CIFilter) -> Void] = [:]
-        for descriptor in FilterPipeline.presets() {
-            map[descriptor.id] = descriptor.configuration
-        }
-        return map
-    }()
 }
 
 private final class LUTCache {

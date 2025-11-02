@@ -29,11 +29,21 @@ Create a private, offline-first video journal tailored for kids on iPad. MyTube 
 - [ ] Player module (AVPlayer wrapper, telemetry logging, feedback entities).
 - [ ] Ranking engine algorithm (scoring, diversity penalty, explore mode).
 - [ ] Editor feature (trim UI, filters, overlays, music mix, export workflow).
-- [ ] Parent Zone (PIN setup/verify, storage meter, bulk management, Calm mode).
+- [ ] Parent Zone (PIN setup/verify, storage meter, bulk management).
 - [ ] On-device ML tagging optional module (Vision, SoundAnalysis hooks).
 - [ ] Accessibility & theming (Dynamic Type, color contrast, multi-profile themes).
 - [ ] QA automation (unit, UI tests, coverage thresholds, performance benchmarks).
 - [ ] Compliance review (Kids Category checklist, privacy statements, consent flows).
+
+### Cross-Device Sync & Sharing
+- [x] Replace custom Nostr implementation with `nostr-sdk-swift` and migrate relay/event handling.
+- [x] Auto-subscribe primary feeds on launch and keep subscriptions alive across app sessions.
+- [x] Implement follow approvals & remote video sharing, including MinIO direct upload and download pipeline.
+- [ ] Resolve remaining NIP-44 v2 decrypt failures (`invalid HMAC`) so both parents receive DMs reliably.
+- [ ] Harden follow reconciliation (backfill pointers, dual-approval checks, conflict logging).
+- [ ] Surface sharing state in UI (download progress, retry/error messaging, clearer follower status).
+- [ ] Add integration tests for follow approval + video share flows (two-device happy path, resend, failure recovery).
+- [ ] Document multi-device onboarding and troubleshooting steps in support materials.
 
 ## Milestone Outline
 | Sprint | Duration | Focus |
@@ -45,4 +55,3 @@ Create a private, offline-first video journal tailored for kids on iPad. MyTube 
 ## Open Questions
 - Preferred approach for Core Data migrations on first release?
 - Do we preload sample stickers/music or ship a download-on-demand flow?
-- Should Calm mode surface in kid UI or remain parent-only toggle?

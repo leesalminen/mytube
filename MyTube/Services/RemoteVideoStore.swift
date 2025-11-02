@@ -9,11 +9,21 @@ import CoreData
 import Foundation
 
 struct RemoteVideoModel: Identifiable, Sendable {
+    enum Status: String, Sendable {
+        case available
+        case downloading
+        case downloaded
+        case failed
+        case revoked
+        case deleted
+    }
+
     struct CryptoEnvelope: Decodable, Sendable {
         let algorithmMedia: String
         let mediaNonce: String
-        let algorithmWrap: String
-        let wrap: Wrap
+        let mediaKey: String?
+        let algorithmWrap: String?
+        let wrap: Wrap?
 
         struct Wrap: Decodable, Sendable {
             let ephemeralPublicKey: String
@@ -32,6 +42,7 @@ struct RemoteVideoModel: Identifiable, Sendable {
         private enum CodingKeys: String, CodingKey {
             case algorithmMedia = "alg_media"
             case mediaNonce = "nonce_media"
+            case mediaKey = "media_key"
             case algorithmWrap = "alg_wrap"
             case wrap
         }
@@ -48,6 +59,10 @@ struct RemoteVideoModel: Identifiable, Sendable {
     let visibility: String
     let expiresAt: Date?
     let status: String
+    let localMediaPath: String?
+    let localThumbPath: String?
+    let lastDownloadedAt: Date?
+    let downloadError: String?
     let lastSyncedAt: Date
     let metadataJSON: String
 
@@ -87,8 +102,26 @@ struct RemoteVideoModel: Identifiable, Sendable {
         self.visibility = visibility
         expiresAt = entity.expiresAt
         self.status = status
+        localMediaPath = entity.localMediaPath
+        localThumbPath = entity.localThumbPath
+        lastDownloadedAt = entity.lastDownloadedAt
+        downloadError = entity.downloadError
         lastSyncedAt = entity.lastSyncedAt ?? Date()
         self.metadataJSON = metadataJSON
+    }
+
+    var statusValue: Status {
+        Status(rawValue: status) ?? .available
+    }
+
+    func localMediaURL(root: URL) -> URL? {
+        guard let localMediaPath else { return nil }
+        return root.appendingPathComponent(localMediaPath)
+    }
+
+    func localThumbURL(root: URL) -> URL? {
+        guard let localThumbPath else { return nil }
+        return root.appendingPathComponent(localThumbPath)
     }
 }
 
@@ -101,7 +134,10 @@ final class RemoteVideoStore {
 
     func fetchAvailableVideos() throws -> [RemoteVideoModel] {
         let request = RemoteVideoEntity.fetchRequest()
-        request.predicate = NSPredicate(format: "status == %@", "available")
+        request.predicate = NSPredicate(
+            format: "status IN %@",
+            ["available", "downloading", "downloaded", "failed", "revoked"]
+        )
         request.sortDescriptors = [NSSortDescriptor(keyPath: \RemoteVideoEntity.createdAt, ascending: false)]
         return try fetch(with: request)
     }
