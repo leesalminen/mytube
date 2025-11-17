@@ -16,6 +16,7 @@ final class VideoShareCoordinator {
     private let keyStore: KeychainKeyStore
     private let relationshipStore: RelationshipStore
     private let videoSharePublisher: VideoSharePublisher
+    private let marmotShareService: MarmotShareService
     private let logger = Logger(subsystem: "com.mytube", category: "VideoShareCoordinator")
     private var contextObserver: NSObjectProtocol?
 
@@ -28,12 +29,14 @@ final class VideoShareCoordinator {
         persistence: PersistenceController,
         keyStore: KeychainKeyStore,
         relationshipStore: RelationshipStore,
-        videoSharePublisher: VideoSharePublisher
+        videoSharePublisher: VideoSharePublisher,
+        marmotShareService: MarmotShareService
     ) {
         self.persistence = persistence
         self.keyStore = keyStore
         self.relationshipStore = relationshipStore
         self.videoSharePublisher = videoSharePublisher
+        self.marmotShareService = marmotShareService
 
         contextObserver = NotificationCenter.default.addObserver(
             forName: .NSManagedObjectContextDidSave,
@@ -158,40 +161,43 @@ final class VideoShareCoordinator {
             } else {
                 followRelationships = cachedFollowRelationships
             }
-            let recipients = recipientParents(
+
+            let groupIds = targetGroups(
                 from: followRelationships,
-                targetChildHex: childHex,
-                localParentHex: localParentHex
+                targetChildHex: childHex
             )
 
-            guard !recipients.isEmpty else {
-                logger.debug("No active followers for video \(video.id.uuidString, privacy: .public); deferring share.")
+            guard !groupIds.isEmpty else {
+                logger.debug("No active Marmot groups for video \(video.id.uuidString, privacy: .public); deferring share.")
                 logFollowDiagnostics(targetChildHex: childHex, localParentHex: localParentHex)
                 pendingVideoIDs.insert(video.id)
                 return
             }
 
-            var failedRecipients: [String] = []
-            for recipientHex in recipients {
-                let recipientKey = ParentIdentityKey(string: recipientHex)?.displayValue ?? recipientHex
+            let shareMessage = try await videoSharePublisher.makeShareMessage(
+                video: video,
+                ownerChildNpub: ownerChildKey
+            )
+
+            var failedGroups: [String] = []
+            for groupId in groupIds {
                 do {
-                    try await videoSharePublisher.share(
-                        video: video,
-                        ownerChildNpub: ownerChildKey,
-                        recipientPublicKey: recipientKey
+                    _ = try await marmotShareService.publishVideoShare(
+                        message: shareMessage,
+                        mlsGroupId: groupId
                     )
                 } catch {
-                    logger.error("Failed sharing video \(video.id.uuidString, privacy: .public) to \(recipientHex.prefix(8), privacy: .public)… \(error.localizedDescription, privacy: .public)")
-                    failedRecipients.append(recipientHex)
+                    logger.error("Failed sharing video \(video.id.uuidString, privacy: .public) to group \(groupId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    failedGroups.append(groupId)
                 }
             }
 
-            if failedRecipients.isEmpty {
+            if failedGroups.isEmpty {
                 pendingVideoIDs.remove(video.id)
-                logger.info("Shared video \(video.id.uuidString, privacy: .public) with \(recipients.count) follower(s).")
+                logger.info("Shared video \(video.id.uuidString, privacy: .public) with \(groupIds.count) Marmot group(s).")
             } else {
                 pendingVideoIDs.insert(video.id)
-                logger.error("Automatic share for video \(video.id.uuidString, privacy: .public) had \(failedRecipients.count) failure(s).")
+                logger.error("Automatic share for video \(video.id.uuidString, privacy: .public) failed for \(failedGroups.count) group(s).")
             }
         } catch {
             pendingVideoIDs.insert(video.id)
@@ -215,32 +221,19 @@ final class VideoShareCoordinator {
         }
     }
 
-    private func recipientParents(
+    private func targetGroups(
         from relationships: [FollowModel],
-        targetChildHex: String,
-        localParentHex: String
+        targetChildHex: String
     ) -> [String] {
-        var recipients: Set<String> = []
-        for follow in relationships {
+        var groups: Set<String> = []
+        for follow in relationships where follow.isFullyApproved {
             let isTarget = follow.targetChildHex()?.caseInsensitiveCompare(targetChildHex) == .orderedSame
             let isFollower = follow.followerChildHex()?.caseInsensitiveCompare(targetChildHex) == .orderedSame
             guard isTarget || isFollower else { continue }
-            guard follow.approvedFrom, follow.approvedTo else { continue }
-            guard follow.status != .revoked, follow.status != .blocked else { continue }
-
-            var parentKeys = follow.remoteParentKeys(localParentHex: localParentHex)
-            if parentKeys.isEmpty,
-               let lastBy = follow.lastMessage?.by,
-               let normalized = ParentIdentityKey(string: lastBy)?.hex.lowercased(),
-               normalized.caseInsensitiveCompare(localParentHex) != .orderedSame {
-                parentKeys = [normalized]
-            }
-
-            for parentHex in parentKeys {
-                recipients.insert(parentHex.lowercased())
-            }
+            guard let groupId = follow.mlsGroupId, !groupId.isEmpty else { continue }
+            groups.insert(groupId)
         }
-        return Array(recipients)
+        return Array(groups)
     }
 
     private func logFollowDiagnostics(targetChildHex: String, localParentHex: String) {

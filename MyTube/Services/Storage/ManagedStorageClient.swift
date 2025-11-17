@@ -79,7 +79,7 @@ actor ManagedStorageClient: MediaStorageClient {
             throw ManagedStorageError.uploadFailed(error)
         }
 
-        // Return a download URL immediately for DM payloads. It may be short-lived.
+        // Return a download URL immediately for Marmot attachments. It may be short-lived.
         let download: PresignDownloadResponse?
         do {
             download = try await backend.presignDownload(key: presign.key)

@@ -2,6 +2,8 @@
 
 This document captures the complete protocol, crypto, storage, and product requirements agreed for MyTube. Treat it as the canonical source of truth for client, control-plane, and premium-feature implementations.
 
+> **Note (2026-03):** All messaging now flows through MDK/Marmot groups. The payload schemas below map to `MarmotMessageKind` values and travel inside MLS-encrypted rumors that `MarmotShareService` produces and `MarmotTransport` publishes (gift-wrapped via NIP-59 when required). See `Docs/mdk.md` for up-to-date MDK usage and the planned Safety HQ group for moderation traffic.
+
 ---
 
 ## 0. Summary
@@ -24,7 +26,7 @@ This document captures the complete protocol, crypto, storage, and product requi
 ### Key Rules
 - Parents store keys in Secure Enclave and expose read-only `npub` in UI for linking.
 - Delegation (NIP-26): parent issues delegation to child device key.
-  - Example conditions: `kind=14`, `since=<now-1d>`, `until=<now+365d>`, optional `kind=30301` if child publishes follow requests; otherwise approvals stay on parent.
+  - Example conditions: `kind=4543/4544/4545/4546/4547`, `since=<now-1d>`, `until=<now+365d>`, optional `kind=30301` if child publishes follow pointers; otherwise approvals stay on parent.
 - Apps must verify delegations for every child-signed event.
 
 ---
@@ -42,8 +44,10 @@ This document captures the complete protocol, crypto, storage, and product requi
 
 ## 3. Cryptography
 
-### Message & Envelope Encryption
-- NIP-44 encrypted DMs (`kind 14`) with compliant framing. Library choice is flexible.
+### Marmot Messaging
+- MDK maintains MLS sessions per child group; `MarmotShareService` encodes payloads as JSON, calls `mdk.createMessage`, and tags them with the appropriate `MarmotMessageKind` (`kind 4543`–`4547`).
+- Rumor events are published via `MarmotTransport` to every relay backing the child’s group. Gift wraps (NIP-59) are only used for welcomes so new members can decrypt `welcomeRumorsJson`.
+- No standalone NIP-44 direct messages remain; MLS handles confidentiality and membership enforcement.
 
 ### Media Encryption (Blobs)
 - Per-video content key `Vk`: 32 random bytes.
@@ -66,8 +70,8 @@ Rationale: XChaCha for long nonces and robust file encryption; X25519 + HKDF for
 
 ## 4. Namespaces, Kinds, and Tags
 
-- Reserve `mytube/*` namespace for payload types inside DMs.
-- Use NIP-33 replaceables.
+- Reserve the `mytube/*` namespace for payload `t` fields encoded inside Marmot application messages.
+- Use NIP-33 replaceables where we still need public pointers.
 
 ### Replaceable (NIP-33) Kinds
 - **kind 30301 — Child follow pointer**
@@ -75,25 +79,34 @@ Rationale: XChaCha for long nonces and robust file encryption; X25519 + HKDF for
 - **kind 30302 — Video tombstone (optional)**
   - `d = "mytube/video:<video_id>"`.
 
-Replaceables carry no PII; they provide “latest pointer” handles. Status details reside in encrypted DMs only.
+Replaceables carry no PII; they provide “latest pointer” handles. Status details now live in MDK (MLS) state.
 
-### DM Kind
-- **kind 14 — NIP-44 encrypted DMs**
-  - Use `p` tags for each recipient `npub`.
-  - Encrypted content uses JSON payload schemas below.
+### Marmot Core Event Kinds
+- **kind 443 — Key package** (`MarmotEventKind.keyPackage`)
+- **kind 444 — Welcome rumor** (`MarmotEventKind.welcome`)
+- **kind 445 — Group commit** (`MarmotEventKind.group`)
+- **kind 1059 — Gift wrap** (`MarmotEventKind.giftWrap`)
+
+### Marmot Application Message Kinds
+These are the `MarmotMessageKind` values produced by `MarmotShareService`:
+- **kind 4543 — Video share**
+- **kind 4544 — Video revoke**
+- **kind 4545 — Video delete**
+- **kind 4546 — Like**
+- **kind 4547 — Report**
 
 ---
 
-## 5. Encrypted DM Payload Schemas
+## 5. Marmot Payload Schemas
 
-All payloads include:
+All Marmot payloads include:
 - `ts` — Unix seconds
 - `by` — `npub` of signer (parent or delegated child key)
 - Optional `v` (e.g. `"v": 1`) for forward compatibility.
 
 ### 5.1 Follow (two approvals: from / to)
 - Type: `t = "mytube/follow"`
-- Recipients: all parents of both families.
+- Recipients: all parents of both families (sent to the child’s MDK group).
 
 ```json
 {
@@ -116,7 +129,7 @@ Rules:
 
 ### 5.2 Video Share (per recipient)
 - Type: `t = "mytube/video_share"`
-- Recipients: viewer child device key and that child’s parents.
+- Recipients: every member of the viewer child’s MDK group (viewer child key + their parents).
 
 ```json
 {
@@ -146,7 +159,7 @@ Rules:
 
 ### 5.3 Video Revoke (stop showing)
 - Type: `t = "mytube/video_revoke"`
-- Recipients: prior recipients (viewer child devices + their parents) and owner parents.
+- Recipients: prior recipients (viewer child devices + their parents) and owner parents (same MDK group fan-out).
 
 ```json
 {
@@ -189,7 +202,7 @@ Client must purge feed entries and local decrypted files immediately.
 
 ### 5.6 Report
 - Type: `t = "mytube/report"`
-- Recipients: both families’ parents and a moderator `npub` controlled by us.
+- Recipients: both families’ parents and, once online, the Safety HQ moderator group.
 
 ```json
 {
@@ -206,14 +219,14 @@ Client must purge feed entries and local decrypted files immediately.
 
 ## 6. Client State Machines
 
-### 6.1 Follow (pointer + DM)
-- Maintain latest kind `30301` per child pair.
+### 6.1 Follow (pointers + MDK)
+- Maintain latest kind `30301` per child pair for discoverability.
 - Active when:
-  1. Latest follow DM shows `approved_from=true` and `approved_to=true`.
-  2. No newer `revoked` or `blocked`.
+  1. Latest follow Marmot payload shows `approved_from=true` and `approved_to=true`.
+  2. MDK reports the remote child’s `mlsGroupId` membership (no newer `revoked` or `blocked`).
 
 ### 6.2 Video Lifecycle
-- `local_only` → (Premium) share: send per-recipient `video_share` DMs.
+- `local_only` → (Premium) share: enqueue `video_share` Marmot messages per eligible group.
 - Revoke: send `video_revoke`; clients hide immediately.
 - Delete: hard delete blobs, send `video_delete`; clients purge caches.
 - Optional: publish kind `30302` tombstone for convergence.
@@ -250,16 +263,16 @@ Client must purge feed entries and local decrypted files immediately.
 
 Auth: Parent JWT or NIP-98 signed HTTP (recommended).
 
-Deletion semantics: hard delete both objects; future GETs return 404. The `video_delete` DM instructs clients to purge.
+Deletion semantics: hard delete both objects; future GETs return 404. The `video_delete` Marmot message instructs clients to purge.
 
 ---
 
 ## 8. Paywall & Gating
 
-- **Free:** Local features only; no `/upload/*`; cannot send `video_share` DMs. Receiving shares requires Premium as well — cloud features require Premium on at least the recipient device’s parent account.
+- **Free:** Local features only; no `/upload/*`; cannot send `video_share` Marmot messages. Receiving shares requires Premium as well — cloud features require Premium on at least the recipient device’s parent account.
 - **Premium ($20/year):**
   - `/upload/*` enabled.
-  - Send/receive `video_share` DMs.
+  - Send/receive `video_share` Marmot messages.
   - Multi-device sync for a family.
 - Enforcement: StoreKit subscription check on device; hide cloud features when inactive. No backend receipt validation required unless desired.
 
@@ -278,28 +291,28 @@ Deletion semantics: hard delete both objects; future GETs return 404. The `video
 ## 10. Sequences (End-to-End)
 
 ### 10.1 Follow X → Y
-1. Parent of X sends follow DM with `approved_from=true`.
-2. Parent of Y sends follow DM with `approved_to=true`.
-3. Both approvals recorded ⇒ follow active.
+1. Parent of X sends `mytube/follow` Marmot payload with `approved_from=true`.
+2. Parent of Y sends the matching payload with `approved_to=true`.
+3. Both approvals recorded in MDK ⇒ follow active.
 
 ### 10.2 Share a Video
 1. App (Premium) generates `Vk`, encrypts MP4/JPG (XChaCha20-Poly1305), uploads via `/upload/init` → PUT → `/upload/commit`.
-2. Compute eligible recipients = active followers of owner child.
-3. For each recipient, send `video_share` DM (with wrapped key and URLs).
+2. Compute eligible recipients = active followers of owner child (`mlsGroupId` membership).
+3. For each group, send a `video_share` Marmot message (with wrapped key and URLs).
 4. Recipient downloads ciphertext (signed GET if private), unwraps `Vk`, decrypts, and plays.
 
 ### 10.3 Delete a Video
 1. Owner parent selects delete (PIN gated).
-2. Send `video_revoke` DMs (broadcast).
+2. Send `video_revoke` Marmot messages (broadcast).
 3. Call `DELETE /media`.
-4. Send `video_delete` DMs (broadcast).
+4. Send `video_delete` Marmot messages (broadcast).
 5. Optional: publish `30302` tombstone. Clients purge caches on receipt.
 
 ---
 
 ## 11. Client Responsibilities
 
-- Encrypt all DM payloads (NIP-44); no child IDs exposed publicly beyond replaceable IDs.
+- Keep all Marmot payloads inside MDK (MLS handles encryption); no child IDs exposed publicly beyond replaceable IDs.
 - Verify signatures on every event and NIP-26 delegations for child-signed actions.
 - Track recipient list at share time for revoke/delete fan-out.
 - Converge on latest replaceable per `d` tag (last-writer-wins by `created_at`, relay ID tie-breaker).
@@ -320,9 +333,9 @@ Deletion semantics: hard delete both objects; future GETs return 404. The `video
 ## 13. QA Checklist
 
 1. **Graph:** A↔B active; A1→B1 follow becomes active only after both approvals.
-2. **Share:** A1 shares; B1 receives DM, decrypts envelope, downloads, decrypts, plays.
-3. **Delete:** A1 deletes; revoke DM hides; blob delete; delete DM purges; subsequent GET returns 404.
-4. **Offline:** B1 offline during delete; on reconnect, receives delete DM and purges.
+2. **Share:** A1 shares; B1 receives Marmot message, decrypts via MDK, downloads, decrypts, plays.
+3. **Delete:** A1 deletes; revoke Marmot message hides; blob delete; delete Marmot message purges; subsequent GET returns 404.
+4. **Offline:** B1 offline during delete; on reconnect, receives delete Marmot message and purges.
 5. **Block:** Family B blocks A; new shares stop; old items hidden on next sync.
 6. **Relays:** With one relay down, events still converge through others.
 7. **Paywall:** Free tier cannot upload/share; Premium unlocks; UI reflects state.

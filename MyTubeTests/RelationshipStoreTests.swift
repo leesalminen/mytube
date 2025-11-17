@@ -184,4 +184,31 @@ final class RelationshipStoreTests: XCTestCase {
         XCTAssertFalse(revoked.approvedTo)
         XCTAssertEqual(revoked.status, .revoked)
     }
+
+    func testUpsertFollowPersistsMlsGroupId() throws {
+        let follower = String(repeating: "a", count: 64)
+        let target = String(repeating: "b", count: 64)
+        let parentKey = String(repeating: "c", count: 64)
+        let groupId = String(repeating: "d", count: 32)
+        let message = FollowMessage(
+            followerChild: follower,
+            targetChild: target,
+            approvedFrom: true,
+            approvedTo: true,
+            status: FollowModel.Status.active.rawValue,
+            by: parentKey,
+            timestamp: Date()
+        )
+
+        let updated = try store.upsertFollow(
+            message: message,
+            updatedAt: Date(),
+            participantKeys: [parentKey],
+            mlsGroupId: groupId
+        )
+
+        XCTAssertEqual(updated.mlsGroupId, groupId)
+        let fetched = try store.fetchFollowRelationships()
+        XCTAssertEqual(fetched.first?.mlsGroupId, groupId)
+    }
 }

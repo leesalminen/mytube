@@ -13,12 +13,20 @@ struct ProfileModel: Identifiable, Hashable {
     var name: String
     var theme: ThemeDescriptor
     var avatarAsset: String
+    var mlsGroupId: String?
 
-    init(id: UUID, name: String, theme: ThemeDescriptor, avatarAsset: String) {
+    init(
+        id: UUID,
+        name: String,
+        theme: ThemeDescriptor,
+        avatarAsset: String,
+        mlsGroupId: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.theme = theme
         self.avatarAsset = avatarAsset
+        self.mlsGroupId = mlsGroupId
     }
 
     init?(entity: ProfileEntity) {
@@ -33,7 +41,8 @@ struct ProfileModel: Identifiable, Hashable {
             id: id,
             name: name,
             theme: theme,
-            avatarAsset: avatarAsset
+            avatarAsset: avatarAsset,
+            mlsGroupId: entity.mlsGroupId
         )
     }
 }
@@ -225,10 +234,16 @@ struct RankingStateModel: Hashable {
 struct FollowRecordMetadata: Codable, Sendable {
     var lastMessage: FollowMessage
     var participantParentKeys: [String]
+    var mlsGroupId: String?
 
-    init(lastMessage: FollowMessage, participantParentKeys: [String] = []) {
+    init(
+        lastMessage: FollowMessage,
+        participantParentKeys: [String] = [],
+        mlsGroupId: String? = nil
+    ) {
         self.lastMessage = lastMessage
         self.participantParentKeys = participantParentKeys
+        self.mlsGroupId = mlsGroupId
         normalizeParticipants()
         ingest(message: lastMessage)
     }
@@ -304,6 +319,7 @@ struct FollowModel: Identifiable, Hashable, Sendable {
     let metadataJSON: String?
     let lastMessage: FollowMessage?
     let participantParentKeys: [String]
+    let mlsGroupId: String?
 
     var id: String { "\(followerChild)|\(targetChild)" }
 
@@ -332,6 +348,7 @@ struct FollowModel: Identifiable, Hashable, Sendable {
            let record = FollowModel.decodeMetadata(metadataJSON) {
             self.lastMessage = record.lastMessage
             self.participantParentKeys = record.participantParentKeys
+            self.mlsGroupId = record.mlsGroupId
         } else {
             self.lastMessage = nil
             if let metadataJSON,
@@ -340,6 +357,7 @@ struct FollowModel: Identifiable, Hashable, Sendable {
             } else {
                 self.participantParentKeys = []
             }
+            self.mlsGroupId = nil
         }
     }
 
@@ -372,7 +390,8 @@ struct FollowModel: Identifiable, Hashable, Sendable {
             lhs.status == rhs.status &&
             lhs.updatedAt == rhs.updatedAt &&
             lhs.metadataJSON == rhs.metadataJSON &&
-            lhs.participantParentKeys == rhs.participantParentKeys
+            lhs.participantParentKeys == rhs.participantParentKeys &&
+            lhs.mlsGroupId == rhs.mlsGroupId
     }
 
     func hash(into hasher: inout Hasher) {
@@ -384,6 +403,7 @@ struct FollowModel: Identifiable, Hashable, Sendable {
         hasher.combine(updatedAt)
         hasher.combine(metadataJSON)
         hasher.combine(participantParentKeys)
+        hasher.combine(mlsGroupId)
     }
 
     func matchesTarget(childHex: String) -> Bool {

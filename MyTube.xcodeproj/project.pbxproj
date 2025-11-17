@@ -7,6 +7,15 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		9B42D5122EC62A3000ED1610 /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B42D5112EC62A3000ED1610 /* MDKBindings */; };
+		9B42D6292EC6367000ED1610 /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B42D6282EC6367000ED1610 /* MDKBindings */; };
+		9B42D62D2EC6375900ED1610 /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B42D62C2EC6375900ED1610 /* MDKBindings */; };
+		9B42D6302EC6380B00ED1610 /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B42D62F2EC6380B00ED1610 /* MDKBindings */; };
+		9B42D6432EC75B5100ED1610 /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B42D6422EC75B5100ED1610 /* MDKBindings */; };
+		9B42D6462EC75C8C00ED1610 /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B42D6452EC75C8C00ED1610 /* MDKBindings */; };
+		9B42D6492EC7684600ED1610 /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B42D6482EC7684600ED1610 /* MDKBindings */; };
+		9B656E342EC9FDE800AFEECE /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B656E332EC9FDE800AFEECE /* MDKBindings */; };
+		9B656E372EC9FE1600AFEECE /* MDKBindings in Frameworks */ = {isa = PBXBuildFile; productRef = 9B656E362EC9FE1600AFEECE /* MDKBindings */; };
 		9BBE63A82EAE45EB0038AFCC /* Crypto in Frameworks */ = {isa = PBXBuildFile; productRef = 9BBE63A72EAE45EB0038AFCC /* Crypto */; };
 		9BBE63AA2EAE45EB0038AFCC /* _CryptoExtras in Frameworks */ = {isa = PBXBuildFile; productRef = 9BBE63A92EAE45EB0038AFCC /* _CryptoExtras */; };
 		9BBE64A52EB1F4E80038AFCC /* NostrSDK in Frameworks */ = {isa = PBXBuildFile; productRef = 9BBE64A42EB1F4E80038AFCC /* NostrSDK */; };
@@ -60,9 +69,18 @@
 			buildActionMask = 2147483647;
 			files = (
 				9BBE63AA2EAE45EB0038AFCC /* _CryptoExtras in Frameworks */,
+				9B656E342EC9FDE800AFEECE /* MDKBindings in Frameworks */,
+				9B42D6292EC6367000ED1610 /* MDKBindings in Frameworks */,
 				9BBE63A82EAE45EB0038AFCC /* Crypto in Frameworks */,
+				9B42D62D2EC6375900ED1610 /* MDKBindings in Frameworks */,
+				9B42D6492EC7684600ED1610 /* MDKBindings in Frameworks */,
 				9BBE64A52EB1F4E80038AFCC /* NostrSDK in Frameworks */,
+				9B656E372EC9FE1600AFEECE /* MDKBindings in Frameworks */,
+				9B42D6302EC6380B00ED1610 /* MDKBindings in Frameworks */,
 				9BBE6A022EB482E60038AFCC /* VideoLab in Frameworks */,
+				9B42D6432EC75B5100ED1610 /* MDKBindings in Frameworks */,
+				9B42D5122EC62A3000ED1610 /* MDKBindings in Frameworks */,
+				9B42D6462EC75C8C00ED1610 /* MDKBindings in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -127,6 +145,15 @@
 				9BBE63A92EAE45EB0038AFCC /* _CryptoExtras */,
 				9BBE64A42EB1F4E80038AFCC /* NostrSDK */,
 				9BBE6A012EB482E60038AFCC /* VideoLab */,
+				9B42D5112EC62A3000ED1610 /* MDKBindings */,
+				9B42D6282EC6367000ED1610 /* MDKBindings */,
+				9B42D62C2EC6375900ED1610 /* MDKBindings */,
+				9B42D62F2EC6380B00ED1610 /* MDKBindings */,
+				9B42D6422EC75B5100ED1610 /* MDKBindings */,
+				9B42D6452EC75C8C00ED1610 /* MDKBindings */,
+				9B42D6482EC7684600ED1610 /* MDKBindings */,
+				9B656E332EC9FDE800AFEECE /* MDKBindings */,
+				9B656E362EC9FE1600AFEECE /* MDKBindings */,
 			);
 			productName = MyTube;
 			productReference = 9BD866522EABAB7B00041C6D /* MyTube.app */;
@@ -214,6 +241,7 @@
 				9BBE63A62EAE45EB0038AFCC /* XCRemoteSwiftPackageReference "swift-crypto" */,
 				9BBE66092EB2FD050038AFCC /* XCRemoteSwiftPackageReference "nostr-sdk-swift" */,
 				9BBE696F2EB476450038AFCC /* XCLocalSwiftPackageReference "ThirdParty/VideoLab" */,
+				9B656E352EC9FE1600AFEECE /* XCLocalSwiftPackageReference "../mdk/swift/MDKPackage" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 9BD866532EABAB7B00041C6D /* Products */;
@@ -596,6 +624,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		9B656E352EC9FE1600AFEECE /* XCLocalSwiftPackageReference "../mdk/swift/MDKPackage" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../mdk/swift/MDKPackage;
+		};
 		9BBE696F2EB476450038AFCC /* XCLocalSwiftPackageReference "ThirdParty/VideoLab" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ThirdParty/VideoLab;
@@ -622,6 +654,42 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		9B42D5112EC62A3000ED1610 /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B42D6282EC6367000ED1610 /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B42D62C2EC6375900ED1610 /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B42D62F2EC6380B00ED1610 /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B42D6422EC75B5100ED1610 /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B42D6452EC75C8C00ED1610 /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B42D6482EC7684600ED1610 /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B656E332EC9FDE800AFEECE /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
+		9B656E362EC9FE1600AFEECE /* MDKBindings */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MDKBindings;
+		};
 		9BBE63A72EAE45EB0038AFCC /* Crypto */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 9BBE63A62EAE45EB0038AFCC /* XCRemoteSwiftPackageReference "swift-crypto" */;

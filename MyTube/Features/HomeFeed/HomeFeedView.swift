@@ -13,6 +13,11 @@ struct HomeFeedView: View {
     @StateObject private var viewModel = HomeFeedViewModel()
     @State private var selectedVideo: RankingEngine.RankedVideo?
     @State private var showingTrustedCreatorsInfo = false
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
 
     private let shelfOrder: [RankingEngine.Shelf] = [.forYou, .recent, .action, .favorites]
 
@@ -58,7 +63,7 @@ struct HomeFeedView: View {
         .alert("Add Trusted Creators", isPresented: $showingTrustedCreatorsInfo) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("Ask a parent to open Parent Zone → Follow Connections to add or approve trusted creators.")
+            Text("Ask a parent to open Parent Zone → Connections to scan a Marmot invite or approve a trusted family.")
         }
     }
 
@@ -80,12 +85,15 @@ struct HomeFeedView: View {
     private var sharedSection: some View {
         VStack(alignment: .leading, spacing: 24) {
             if viewModel.sharedSections.isEmpty {
-                Text("No videos from trusted creators yet.")
+                Text("No videos from trusted families yet. Ask a parent to open Parent Zone → Connections to share or accept Marmot invites.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
                 Text("From Trusted Creators")
                     .font(.title2.bold())
+                if viewModel.remoteShareSummary.hasActivity {
+                    remoteShareSummaryCard(summary: viewModel.remoteShareSummary)
+                }
                 ForEach(viewModel.sharedSections) { section in
                     VStack(alignment: .leading, spacing: 12) {
                         Text(section.ownerDisplayName)
@@ -143,6 +151,31 @@ struct HomeFeedView: View {
             return nil
         }
         return UIImage(contentsOfFile: url.path)
+    }
+
+    @ViewBuilder
+    private func remoteShareSummaryCard(summary: HomeFeedViewModel.RemoteShareSummary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("\(summary.totalCount) shared \(summary.totalCount == 1 ? "video" : "videos") available", systemImage: "tray.and.arrow.down.fill")
+                .font(.headline)
+            HStack(spacing: 16) {
+                Label("\(summary.availableCount) queued", systemImage: "arrow.down.circle")
+                Label("\(summary.downloadedCount) ready", systemImage: "checkmark.circle")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            if let last = summary.lastSharedAt {
+                Text("Last shared \(HomeFeedView.relativeFormatter.localizedString(for: last, relativeTo: Date()))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+        )
     }
 
     private var addTrustedCreatorsButton: some View {

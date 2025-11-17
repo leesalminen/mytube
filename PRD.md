@@ -38,12 +38,12 @@ Create a private, offline-first video journal tailored for kids on iPad. MyTube 
 ### Cross-Device Sync & Sharing
 - [x] Replace custom Nostr implementation with `nostr-sdk-swift` and migrate relay/event handling.
 - [x] Auto-subscribe primary feeds on launch and keep subscriptions alive across app sessions.
-- [x] Implement follow approvals & remote video sharing, including MinIO direct upload and download pipeline.
-- [ ] Resolve remaining NIP-44 v2 decrypt failures (`invalid HMAC`) so both parents receive DMs reliably.
-- [ ] Harden follow reconciliation (backfill pointers, dual-approval checks, conflict logging).
-- [ ] Surface sharing state in UI (download progress, retry/error messaging, clearer follower status).
-- [ ] Add integration tests for follow approval + video share flows (two-device happy path, resend, failure recovery).
-- [ ] Document multi-device onboarding and troubleshooting steps in support materials.
+- [x] Implement follow approvals & remote video sharing via MDK groups (per-child MLS state, gift-wrapped welcomes).
+- [x] Replace the legacy direct-message transport with MDK (`MarmotShareService`, `MarmotProjectionStore`) for shares/likes/reports.
+- [ ] Harden MDK reconciliation (backfill pointers, dual-approval checks, conflict logging).
+- [ ] Surface live Marmot sharing state in UI (download progress, retry/error messaging, clearer group membership status).
+- [ ] Add integration tests for MDK follow approval + video share flows (two-device happy path, resend, failure recovery).
+- [ ] Document multi-device onboarding and troubleshooting steps in support materials (focus on MDK key packages + welcomes).
 
 ## Milestone Outline
 | Sprint | Duration | Focus |

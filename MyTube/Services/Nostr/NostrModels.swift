@@ -15,14 +15,12 @@ enum MyTubeEventKind: Int {
     case metadata = 0
     case childFollowPointer = 30301
     case videoTombstone = 30302
-    case directMessage = 14
 }
 
 extension EventKind {
     static var metadata: EventKind { EventKind(kind: UInt16(MyTubeEventKind.metadata.rawValue)) }
     static var mytubeChildFollowPointer: EventKind { EventKind(kind: UInt16(MyTubeEventKind.childFollowPointer.rawValue)) }
     static var mytubeVideoTombstone: EventKind { EventKind(kind: UInt16(MyTubeEventKind.videoTombstone.rawValue)) }
-    static var directMessage: EventKind { EventKind(kind: UInt16(MyTubeEventKind.directMessage.rawValue)) }
 }
 
 /// Snapshot describing the connection health of a relay.

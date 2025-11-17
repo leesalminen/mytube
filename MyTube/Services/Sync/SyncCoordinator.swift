@@ -17,6 +17,7 @@ actor SyncCoordinator {
 
     private let nostrClient: NostrClient
     private let relayDirectory: RelayDirectory
+    private let marmotTransport: MarmotTransport
     private let eventReducer: NostrEventReducer
     private let keyStore: KeychainKeyStore
     private let relationshipStore: RelationshipStore
@@ -34,6 +35,7 @@ actor SyncCoordinator {
         persistence: PersistenceController,
         nostrClient: NostrClient,
         relayDirectory: RelayDirectory,
+        marmotTransport: MarmotTransport,
         keyStore: KeychainKeyStore,
         cryptoService: CryptoEnvelopeService,
         relationshipStore: RelationshipStore,
@@ -47,6 +49,7 @@ actor SyncCoordinator {
     ) {
         self.nostrClient = nostrClient
         self.relayDirectory = relayDirectory
+        self.marmotTransport = marmotTransport
         self.keyStore = keyStore
         self.relationshipStore = relationshipStore
         self.parentProfileStore = parentProfileStore
@@ -131,6 +134,7 @@ actor SyncCoordinator {
     private func handle(_ event: NostrEvent) async {
         let kindCode = event.kind().asU16()
         logger.debug("Received event kind \(kindCode, privacy: .public) id \(event.idHex, privacy: .public)")
+        await marmotTransport.handleIncoming(event: event)
         await eventReducer.handle(event: event)
     }
 
@@ -145,7 +149,9 @@ actor SyncCoordinator {
 
         let sinceSeconds = Date().addingTimeInterval(-14 * 24 * 60 * 60).timeIntervalSince1970
         let sinceTimestamp = Timestamp.fromSecs(secs: UInt64(max(0, Int(sinceSeconds))))
-        let dmKinds = [Kind(kind: UInt16(MyTubeEventKind.directMessage.rawValue))]
+        let marmotWelcomeKinds = MarmotEventKind.welcomeKinds
+        let marmotKeyPackageKinds = MarmotEventKind.keyPackageKinds
+        let marmotMembershipKinds = MarmotEventKind.membershipKinds
         var filters: [Filter] = []
 
         if !pointerKeys.isEmpty {
@@ -178,26 +184,51 @@ actor SyncCoordinator {
             filters.append(metadataFilter)
         }
 
+        var parentPublicKey: NostrSDK.PublicKey?
         if let parentHex {
             let normalizedParent = parentHex.lowercased()
-            guard let parentKey = try? NostrSDK.PublicKey.parse(publicKey: normalizedParent) else {
+            guard let parsedParent = try? NostrSDK.PublicKey.parse(publicKey: normalizedParent) else {
                 logger.warning("Unable to parse parent public key for subscriptions")
                 return
             }
+            parentPublicKey = parsedParent
+        }
 
-            // Inbound direct messages address our parent key via the #p tag.
-            var inboundDMFilter = Filter()
-            inboundDMFilter = inboundDMFilter.kinds(kinds: dmKinds)
-            inboundDMFilter = inboundDMFilter.pubkeys(pubkeys: [parentKey])
-            inboundDMFilter = inboundDMFilter.since(timestamp: sinceTimestamp)
-            filters.append(inboundDMFilter)
+        if !metadataAuthors.isEmpty {
+            var keyPackageFilter = Filter()
+            keyPackageFilter = keyPackageFilter.kinds(kinds: marmotKeyPackageKinds)
+            keyPackageFilter = keyPackageFilter.authors(authors: metadataAuthors)
+            keyPackageFilter = keyPackageFilter.since(timestamp: sinceTimestamp)
+            filters.append(keyPackageFilter)
 
-            // Outbound messages still need to be tracked so reducers can reconcile state.
-            var outboundDMFilter = Filter()
-            outboundDMFilter = outboundDMFilter.kinds(kinds: dmKinds)
-            outboundDMFilter = outboundDMFilter.authors(authors: [parentKey])
-            outboundDMFilter = outboundDMFilter.since(timestamp: sinceTimestamp)
-            filters.append(outboundDMFilter)
+            var groupFilter = Filter()
+            groupFilter = groupFilter.kinds(kinds: marmotMembershipKinds)
+            groupFilter = groupFilter.authors(authors: metadataAuthors)
+            groupFilter = groupFilter.since(timestamp: sinceTimestamp)
+            filters.append(groupFilter)
+        }
+
+        var welcomeRecipientPubkeys: [NostrSDK.PublicKey] = []
+        var welcomeRecipientHex: Set<String> = []
+
+        if let parentKey = parentPublicKey, let parentHex {
+            welcomeRecipientPubkeys.append(parentKey)
+            welcomeRecipientHex.insert(parentHex.lowercased())
+        }
+
+        for childKey in localChildPublicKeys() {
+            let hex = childKey.toHex().lowercased()
+            if welcomeRecipientHex.insert(hex).inserted {
+                welcomeRecipientPubkeys.append(childKey)
+            }
+        }
+
+        if !welcomeRecipientPubkeys.isEmpty {
+            var welcomeFilter = Filter()
+            welcomeFilter = welcomeFilter.kinds(kinds: marmotWelcomeKinds)
+            welcomeFilter = welcomeFilter.pubkeys(pubkeys: welcomeRecipientPubkeys)
+            welcomeFilter = welcomeFilter.since(timestamp: sinceTimestamp)
+            filters.append(welcomeFilter)
         }
 
         if filters.isEmpty {
@@ -261,5 +292,19 @@ actor SyncCoordinator {
         }
 
         return (parentHex, childKeys, remoteParents)
+    }
+
+    private func localChildPublicKeys() -> [NostrSDK.PublicKey] {
+        guard let identifiers = try? keyStore.childKeyIdentifiers() else { return [] }
+        var results: [NostrSDK.PublicKey] = []
+        results.reserveCapacity(identifiers.count)
+        for id in identifiers {
+            guard
+                let pair = try? keyStore.fetchKeyPair(role: .child(id: id)),
+                let key = try? NostrSDK.PublicKey.parse(publicKey: pair.publicKeyHex.lowercased())
+            else { continue }
+            results.append(key)
+        }
+        return results
     }
 }

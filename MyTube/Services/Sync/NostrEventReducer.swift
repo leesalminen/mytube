@@ -27,18 +27,13 @@ struct SyncReducerContext {
 actor NostrEventReducer {
     private let context: SyncReducerContext
     private let logger = Logger(subsystem: "com.mytube", category: "NostrReducer")
-    private let dmDecoder: JSONDecoder
-    private let dmEncoder: JSONEncoder
+    private let jsonDecoder: JSONDecoder
 
     init(context: SyncReducerContext) {
         self.context = context
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
-        dmDecoder = decoder
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        dmEncoder = encoder
+        jsonDecoder = decoder
     }
 
     func handle(event: NostrEvent) async {
@@ -56,8 +51,6 @@ actor NostrEventReducer {
                 try await reduceFollowPointer(event)
             case .videoTombstone:
                 try await reduceVideoTombstone(event)
-            case .directMessage:
-                try await reduceDirectMessage(event)
             }
         } catch {
             logger.error("Reducer failure for kind \(kindCode, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -72,7 +65,7 @@ actor NostrEventReducer {
 
         let payload: ProfileMetadataPayload
         do {
-            payload = try dmDecoder.decode(ProfileMetadataPayload.self, from: data)
+            payload = try jsonDecoder.decode(ProfileMetadataPayload.self, from: data)
         } catch {
             logger.warning("Failed to decode parent metadata \(event.idHex, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return
@@ -145,7 +138,7 @@ actor NostrEventReducer {
 
         let pointerMessage: FollowMessage?
         if let data = event.content().data(using: .utf8) {
-            pointerMessage = try? dmDecoder.decode(FollowMessage.self, from: data)
+            pointerMessage = try? jsonDecoder.decode(FollowMessage.self, from: data)
         } else {
             pointerMessage = nil
         }
@@ -159,7 +152,7 @@ actor NostrEventReducer {
 
             logger.debug(
                 """
-                Follow pointer DM content follower \(followerCanonical, privacy: .public) \
+                Follow pointer message follower \(followerCanonical, privacy: .public) \
                 target \(targetCanonical, privacy: .public) approvedFrom \(message.approvedFrom) \
                 approvedTo \(message.approvedTo) status \(message.status, privacy: .public)
                 """
@@ -254,66 +247,6 @@ actor NostrEventReducer {
         }
     }
 
-    private func reduceDirectMessage(_ event: NostrEvent) async throws {
-        guard
-            let senderPublicKey = Data(hexString: event.pubkey)
-        else {
-            logger.error("DM \(event.idHex, privacy: .public) has invalid sender public key.")
-            return
-        }
-
-        guard let parentKeyPair = try context.keyStore.fetchKeyPair(role: .parent) else {
-            logger.warning("No parent key configured. Skipping DM \(event.idHex, privacy: .public).")
-            return
-        }
-
-        let plaintext: Data
-        do {
-            plaintext = try context.cryptoService.decryptDirectMessage(
-                event.content(),
-                recipientPrivateKeyData: parentKeyPair.privateKeyData,
-                senderPublicKeyXOnly: senderPublicKey
-            )
-        } catch {
-            logger.error("Failed to decrypt DM \(event.idHex, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        let baseEnvelope: DirectMessageEnvelope
-        do {
-            baseEnvelope = try dmDecoder.decode(DirectMessageEnvelope.self, from: plaintext)
-        } catch {
-            logger.error("Failed to decode DM envelope for \(event.idHex, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        guard let kind = DirectMessageKind(rawValue: baseEnvelope.t) else {
-            logger.warning("Unsupported DM kind \(baseEnvelope.t, privacy: .public)")
-            return
-        }
-
-        switch kind {
-        case .follow:
-            let payload = try dmDecoder.decode(FollowMessage.self, from: plaintext)
-            try await reduceFollowDM(payload)
-        case .videoShare:
-            let payload = try dmDecoder.decode(VideoShareMessage.self, from: plaintext)
-            try await reduceVideoShareDM(payload)
-        case .videoRevoke:
-            let payload: VideoLifecycleMessage = try dmDecoder.decode(VideoLifecycleMessage.self, from: plaintext)
-            try await reduceVideoRevokeDM(payload)
-        case .videoDelete:
-            let payload: VideoLifecycleMessage = try dmDecoder.decode(VideoLifecycleMessage.self, from: plaintext)
-            try await reduceVideoDeleteDM(payload)
-        case .like:
-            let payload = try dmDecoder.decode(LikeMessage.self, from: plaintext)
-            await reduceLikeDM(payload)
-        case .report:
-            let payload = try dmDecoder.decode(ReportMessage.self, from: plaintext)
-            await reduceReportDM(payload)
-        }
-    }
-
     private func encodeMetadata(_ metadata: [String: Any]) -> String {
         guard JSONSerialization.isValidJSONObject(metadata),
               let data = try? JSONSerialization.data(withJSONObject: metadata),
@@ -324,260 +257,6 @@ actor NostrEventReducer {
         return json
     }
 
-    private func reduceLikeDM(_ message: LikeMessage) async {
-        await context.likeStore.processIncomingLike(message)
-    }
-
-    private func reduceReportDM(_ message: ReportMessage) async {
-        let timestamp = Date(timeIntervalSince1970: message.ts)
-        let reason = ReportReason(rawValue: message.reason) ?? .other
-        let reporterHex = canonicalKey(message.by)
-        let subjectHex = canonicalKey(message.subjectChild)
-        let localParentHex = localParentPublicKey()
-        let reporterIsLocal = reporterHex == localParentHex
-        let subjectIsLocalChild = localChildHexKeys().contains(subjectHex)
-
-        do {
-            let stored = try await context.reportStore.ingestReportMessage(
-                message,
-                isOutbound: reporterIsLocal,
-                createdAt: timestamp,
-                deliveredAt: reporterIsLocal ? timestamp : nil,
-                defaultStatus: reporterIsLocal ? .acknowledged : .pending,
-                action: nil
-            )
-
-            if reporterIsLocal {
-                await handleReporterSideEffects(for: message, reason: reason, timestamp: timestamp, stored: stored)
-            }
-
-            if subjectIsLocalChild {
-                await handleSubjectSideEffects(for: message, reason: reason, timestamp: timestamp, stored: stored)
-            }
-        } catch {
-            logger.error("Failed to persist report DM for video \(message.videoId, privacy: .public): \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func handleReporterSideEffects(
-        for message: ReportMessage,
-        reason: ReportReason,
-        timestamp: Date,
-        stored: ReportModel
-    ) async {
-        do {
-            _ = try context.remoteVideoStore.markVideoAsBlocked(
-                videoId: message.videoId,
-                reason: reason.rawValue,
-                storagePaths: context.storagePaths,
-                timestamp: timestamp
-            )
-        } catch {
-            logger.error("Failed to mark reported video \(message.videoId, privacy: .public) as blocked: \(error.localizedDescription, privacy: .public)")
-        }
-
-        let action = stored.actionTaken == .none ? .reportOnly : stored.actionTaken
-        do {
-            try await context.reportStore.updateStatus(
-                reportId: stored.id,
-                status: .actioned,
-                action: action,
-                lastActionAt: timestamp
-            )
-        } catch {
-            logger.error("Failed updating report status after reporter side effects: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func handleSubjectSideEffects(
-        for message: ReportMessage,
-        reason: ReportReason,
-        timestamp: Date,
-        stored: ReportModel
-    ) async {
-        guard let uuid = UUID(uuidString: message.videoId) else {
-            logger.warning("Reported video id \(message.videoId, privacy: .public) is not a valid UUID; skipping local marking.")
-            return
-        }
-
-        do {
-            _ = try await context.videoLibrary.markVideoReported(
-                videoId: uuid,
-                reason: reason,
-                reportedAt: timestamp
-            )
-        } catch {
-            logger.error("Failed to mark local video \(message.videoId, privacy: .public) as reported: \(error.localizedDescription, privacy: .public)")
-        }
-
-        do {
-            try await context.reportStore.updateStatus(
-                reportId: stored.id,
-                status: .actioned,
-                action: .deleted,
-                lastActionAt: timestamp
-            )
-        } catch {
-            logger.error("Failed updating report status after subject side effects: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func encodeJSON<T: Encodable>(_ value: T) -> String {
-        guard let data = try? dmEncoder.encode(value),
-              let json = String(data: data, encoding: .utf8) else {
-            return "{}"
-        }
-        return json
-    }
-
-    private func reduceFollowDM(_ message: FollowMessage) async throws {
-        guard let parentPair = try context.keyStore.fetchKeyPair(role: .parent) else {
-            logger.warning("Follow DM ignored; parent identity missing")
-            return
-        }
-        guard let remoteParent = ParentIdentityKey(string: message.by) else {
-            logger.warning("Follow DM has invalid parent key")
-            return
-        }
-
-        let updatedAt = Date(timeIntervalSince1970: message.ts)
-        let messageDate = Date(timeIntervalSince1970: message.ts)
-        let finalStatus = message.status
-
-        let normalizedMessage = FollowMessage(
-            followerChild: message.followerChild,
-            targetChild: message.targetChild,
-            approvedFrom: message.approvedFrom,
-            approvedTo: message.approvedTo,
-            status: finalStatus,
-            by: message.by,
-            timestamp: messageDate
-        )
-
-        do {
-            _ = try context.relationshipStore.upsertFollow(
-                message: normalizedMessage,
-                updatedAt: updatedAt,
-                participantKeys: [message.by]
-            )
-        } catch {
-            logger.error("Failed to persist follow DM: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func reduceVideoShareDM(_ message: VideoShareMessage) async throws {
-        let metadataJSON = encodeJSON(message)
-        let cryptoJSON = encodeJSON(message.crypto)
-        let createdAt = message.meta?.createdAtDate ?? Date(timeIntervalSince1970: message.ts)
-        let expiresAt = message.policy?.expiresAtDate
-        let lastSynced = Date(timeIntervalSince1970: message.ts)
-
-        try await performBackgroundTask { context in
-            let request = RemoteVideoEntity.fetchRequest()
-            request.predicate = NSPredicate(format: "videoId == %@", message.videoId)
-            request.fetchLimit = 1
-
-            let (entity, isNew): (RemoteVideoEntity, Bool) = {
-                if let existing = (try? context.fetch(request))?.first {
-                    return (existing, false)
-                } else {
-                    let newEntity = RemoteVideoEntity(context: context)
-                    newEntity.videoId = message.videoId
-                    return (newEntity, true)
-                }
-            }()
-
-            let previousStatus = entity.status ?? RemoteVideoModel.Status.available.rawValue
-            let previousMediaPath = entity.localMediaPath
-            let previousThumbPath = entity.localThumbPath
-            let previousDownloadedAt = entity.lastDownloadedAt
-
-            entity.ownerChild = message.ownerChild
-            entity.title = message.meta?.title ?? "Untitled"
-            entity.duration = message.meta?.duration ?? 0
-            entity.createdAt = createdAt
-            entity.blobURL = message.blob.url
-            entity.thumbURL = message.thumb.url
-            entity.wrappedKeyJSON = cryptoJSON
-            entity.visibility = message.policy?.visibility ?? "followers"
-            entity.expiresAt = expiresAt
-            if previousStatus == RemoteVideoModel.Status.downloaded.rawValue {
-                entity.status = previousStatus
-                entity.localMediaPath = previousMediaPath
-                entity.localThumbPath = previousThumbPath
-                entity.lastDownloadedAt = previousDownloadedAt
-            } else {
-                entity.status = RemoteVideoModel.Status.available.rawValue
-                if !isNew {
-                    entity.localMediaPath = nil
-                    entity.localThumbPath = nil
-                    entity.lastDownloadedAt = nil
-                }
-            }
-            entity.downloadError = nil
-            entity.lastSyncedAt = lastSynced
-            entity.metadataJSON = metadataJSON
-
-            try context.save()
-        }
-    }
-
-    private func reduceVideoRevokeDM(_ message: VideoLifecycleMessage) async throws {
-        let metadataJSON = encodeJSON(message)
-        let syncedAt = Date(timeIntervalSince1970: message.ts)
-        let videoId = message.videoId
-        let logger = self.logger
-
-        try await performBackgroundTask { [metadataJSON, syncedAt, videoId, logger] context in
-            let request = RemoteVideoEntity.fetchRequest()
-            request.predicate = NSPredicate(format: "videoId == %@", videoId)
-            request.fetchLimit = 1
-
-            guard let entity = try context.fetch(request).first else {
-                logger.warning("Received revoke for unknown video \(videoId)")
-                return
-            }
-
-            entity.status = RemoteVideoModel.Status.revoked.rawValue
-            entity.localMediaPath = nil
-            entity.localThumbPath = nil
-            entity.lastDownloadedAt = nil
-            entity.downloadError = nil
-            entity.lastSyncedAt = syncedAt
-            entity.metadataJSON = metadataJSON
-
-            try context.save()
-        }
-    }
-
-    private func reduceVideoDeleteDM(_ message: VideoLifecycleMessage) async throws {
-        let metadataJSON = encodeJSON(message)
-        let syncedAt = Date(timeIntervalSince1970: message.ts)
-        let videoId = message.videoId
-        let logger = self.logger
-
-        try await performBackgroundTask { [metadataJSON, syncedAt, videoId, logger] context in
-            let request = RemoteVideoEntity.fetchRequest()
-            request.predicate = NSPredicate(format: "videoId == %@", videoId)
-            request.fetchLimit = 1
-
-            guard let entity = try context.fetch(request).first else {
-                logger.warning("Received delete for unknown video \(videoId)")
-                return
-            }
-
-            entity.status = RemoteVideoModel.Status.deleted.rawValue
-            entity.localMediaPath = nil
-            entity.localThumbPath = nil
-            entity.lastDownloadedAt = nil
-            entity.downloadError = nil
-            entity.lastSyncedAt = syncedAt
-            entity.metadataJSON = metadataJSON
-
-            try context.save()
-        }
-    }
-
     private func canonicalKey(_ value: String) -> String {
         if let parent = ParentIdentityKey(string: value) {
             return parent.hex.lowercased()
@@ -586,26 +265,6 @@ actor NostrEventReducer {
             return data.hexEncodedString().lowercased()
         }
         return value.lowercased()
-    }
-
-    private func localParentPublicKey() -> String? {
-        guard let pair = try? context.keyStore.fetchKeyPair(role: .parent) else {
-            return nil
-        }
-        return pair.publicKeyHex.lowercased()
-    }
-
-    private func localChildHexKeys() -> Set<String> {
-        guard let identifiers = try? context.keyStore.childKeyIdentifiers() else {
-            return []
-        }
-        var keys: Set<String> = []
-        for identifier in identifiers {
-            if let pair = try? context.keyStore.fetchKeyPair(role: .child(id: identifier)) {
-                keys.insert(pair.publicKeyHex.lowercased())
-            }
-        }
-        return keys
     }
 
     private func performBackgroundTask(_ work: @escaping @Sendable (NSManagedObjectContext) throws -> Void) async throws {

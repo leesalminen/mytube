@@ -16,44 +16,29 @@ actor ReportCoordinator {
 
     private let reportStore: ReportStore
     private let remoteVideoStore: RemoteVideoStore
-    private let videoLibrary: VideoLibrary
-    private let directMessageOutbox: DirectMessageOutbox
+    private let marmotShareService: MarmotShareService
     private let keyStore: KeychainKeyStore
-    private let backendClient: BackendClient
-    private let safetyStore: SafetyConfigurationStore
     private let storagePaths: StoragePaths
     private let relationshipStore: RelationshipStore
-    private let followCoordinator: FollowCoordinator
+    private let groupMembershipCoordinator: any GroupMembershipCoordinating
     private let logger = Logger(subsystem: "com.mytube", category: "ReportCoordinator")
-    private let moderatorCacheDuration: TimeInterval = 60 * 60
-    private let jsonDecoder = JSONDecoder()
-
-    private var cachedModeratorKey: String?
-    private var moderatorKeyExpiresAt: Date?
-    private var moderatorFetchTask: Task<String?, Never>?
 
     init(
         reportStore: ReportStore,
         remoteVideoStore: RemoteVideoStore,
-        videoLibrary: VideoLibrary,
-        directMessageOutbox: DirectMessageOutbox,
+        marmotShareService: MarmotShareService,
         keyStore: KeychainKeyStore,
-        backendClient: BackendClient,
-        safetyStore: SafetyConfigurationStore,
         storagePaths: StoragePaths,
         relationshipStore: RelationshipStore,
-        followCoordinator: FollowCoordinator
+        groupMembershipCoordinator: any GroupMembershipCoordinating
     ) {
         self.reportStore = reportStore
         self.remoteVideoStore = remoteVideoStore
-        self.videoLibrary = videoLibrary
-        self.directMessageOutbox = directMessageOutbox
+        self.marmotShareService = marmotShareService
         self.keyStore = keyStore
-        self.backendClient = backendClient
-        self.safetyStore = safetyStore
         self.storagePaths = storagePaths
         self.relationshipStore = relationshipStore
-        self.followCoordinator = followCoordinator
+        self.groupMembershipCoordinator = groupMembershipCoordinator
     }
 
     @discardableResult
@@ -86,29 +71,23 @@ actor ReportCoordinator {
             action: action
         )
 
-        let recipients = await resolveRecipients(
-            for: videoId,
-            subjectChild: subjectChild,
-            reporterKey: reporterKey
+        let targetGroups = resolveRecipientGroups(
+            videoId: videoId,
+            subjectChild: subjectChild
         )
 
-        if recipients.isEmpty {
-            logger.warning("No recipients resolved for report on video \(videoId, privacy: .public)")
+        if targetGroups.isEmpty {
+            logger.warning("No Marmot groups resolved for report on video \(videoId, privacy: .public)")
         }
 
-        for recipient in recipients {
+        for groupId in targetGroups {
             do {
-                try await directMessageOutbox.sendMessage(
-                    message,
-                    kind: .report,
-                    recipientPublicKey: recipient,
-                    additionalTags: [
-                        NostrTagBuilder.make(name: "d", value: videoId)
-                    ],
-                    createdAt: createdAt
+                try await marmotShareService.publishReport(
+                    message: message,
+                    mlsGroupId: groupId
                 )
             } catch {
-                logger.error("Failed to deliver report for \(videoId, privacy: .public) to \(recipient.prefix(12), privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error("Failed to publish report for \(videoId, privacy: .public) to group \(groupId, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
 
@@ -146,48 +125,44 @@ actor ReportCoordinator {
 
     // MARK: - Moderation recipients
 
-    private func resolveRecipients(
-        for videoId: String,
-        subjectChild: String,
-        reporterKey: String
-    ) async -> [String] {
-        var recipients: Set<String> = []
-
-        // Always notify the subject child's device/parents.
-        if !subjectChild.isEmpty {
-            recipients.insert(subjectChild)
+    private func resolveRecipientGroups(
+        videoId: String,
+        subjectChild: String
+    ) -> [String] {
+        var candidateKeys: Set<String> = []
+        if let normalized = canonicalChildKey(subjectChild) {
+            candidateKeys.insert(normalized)
         }
 
-        if let remote = try? remoteVideoStore.fetchVideo(videoId: videoId) {
-            if let message = decodeVideoShareMessage(remote.metadataJSON) {
-                recipients.insert(message.by)
-                recipients.insert(message.ownerChild)
+        if candidateKeys.isEmpty,
+           let remote = try? remoteVideoStore.fetchVideo(videoId: videoId),
+           let normalized = canonicalChildKey(remote.ownerChild) {
+            candidateKeys.insert(normalized)
+        }
+
+        guard !candidateKeys.isEmpty else {
+            return []
+        }
+
+        let relationships: [FollowModel]
+        do {
+            relationships = try relationshipStore.fetchFollowRelationships()
+        } catch {
+            logger.error("Failed to load follow relationships for report recipients: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+
+        var groupIds: Set<String> = []
+        for follow in relationships {
+            guard let groupId = follow.mlsGroupId, !groupId.isEmpty else { continue }
+            let followerHex = follow.followerChildHex()?.lowercased()
+            let targetHex = follow.targetChildHex()?.lowercased()
+            if followerHex.map(candidateKeys.contains) == true || targetHex.map(candidateKeys.contains) == true {
+                groupIds.insert(groupId)
             }
         }
 
-        if let moderator = await fetchModeratorKey(forceRefresh: false) {
-            recipients.insert(moderator)
-        }
-
-        // Do not send the DM back to the reporter.
-        recipients.remove(reporterKey)
-        if let normalizedReporter = ParentIdentityKey(string: reporterKey) {
-            let reporterHex = normalizedReporter.hex.lowercased()
-            let reporterDisplay = normalizedReporter.displayValue.lowercased()
-            recipients = Set(
-                recipients.filter {
-                    let lowered = $0.lowercased()
-                    return lowered != reporterHex && lowered != reporterDisplay
-                }
-            )
-        }
-
-        return Array(recipients)
-    }
-
-    private func decodeVideoShareMessage(_ json: String) -> VideoShareMessage? {
-        guard let data = json.data(using: .utf8) else { return nil }
-        return try? jsonDecoder.decode(VideoShareMessage.self, from: data)
+        return Array(groupIds)
     }
 
     private func applyRelationshipAction(
@@ -203,6 +178,7 @@ actor ReportCoordinator {
 
         let localParentHex = parentPair.publicKeyHex.lowercased()
         let normalizedSubject = ParentIdentityKey(string: subjectChild)?.hex.lowercased() ?? subjectChild.lowercased()
+        let actorKey = parentPair.publicKeyBech32 ?? parentPair.publicKeyHex
 
         let relationships: [FollowModel]
         do {
@@ -219,27 +195,61 @@ actor ReportCoordinator {
             let targetHex = follow.targetChildHex()?.lowercased()
             guard followerHex == normalizedSubject || targetHex == normalizedSubject else { continue }
             guard let remoteParentKey = resolveRemoteParentKey(for: follow, localParentHex: localParentHex) else { continue }
+            guard let remoteParentIdentity = ParentIdentityKey(string: remoteParentKey) else { continue }
+            guard let groupId = follow.mlsGroupId else {
+                logger.warning("Skipping removal for follow \(follow.id, privacy: .public); missing group identifier.")
+                continue
+            }
 
             do {
-                switch action {
-                case .unfollow:
-                    _ = try await followCoordinator.revokeFollow(
-                        follow: follow,
-                        remoteParentKey: remoteParentKey,
-                        now: timestamp
-                    )
-                case .block:
-                    _ = try await followCoordinator.blockFollow(
-                        follow: follow,
-                        remoteParentKey: remoteParentKey,
-                        now: timestamp
-                    )
-                default:
-                    break
-                }
+                try await removeParentFromGroup(
+                    follow: follow,
+                    groupId: groupId,
+                    remoteParent: remoteParentIdentity,
+                    newStatus: action == .block ? .blocked : .revoked,
+                    actorKey: actorKey,
+                    timestamp: timestamp
+                )
             } catch {
                 logger.error("Failed applying \(action.rawValue, privacy: .public) to follow \(follow.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
+        }
+    }
+
+    private func removeParentFromGroup(
+        follow: FollowModel,
+        groupId: String,
+        remoteParent: ParentIdentityKey,
+        newStatus: FollowModel.Status,
+        actorKey: String,
+        timestamp: Date
+    ) async throws {
+        let request = GroupMembershipCoordinator.RemoveMembersRequest(
+            mlsGroupId: groupId,
+            memberPublicKeys: [remoteParent.hex.lowercased()],
+            relayOverride: nil
+        )
+        _ = try await groupMembershipCoordinator.removeMembers(request: request)
+
+        let message = FollowMessage(
+            followerChild: follow.followerChild,
+            targetChild: follow.targetChild,
+            approvedFrom: false,
+            approvedTo: false,
+            status: newStatus.rawValue,
+            by: actorKey,
+            timestamp: timestamp
+        )
+
+        do {
+            _ = try relationshipStore.upsertFollow(
+                message: message,
+                updatedAt: timestamp,
+                participantKeys: [remoteParent.displayValue],
+                mlsGroupId: groupId
+            )
+        } catch {
+            logger.error("Failed to update relationship for follow \(follow.id, privacy: .public) after removal: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -261,56 +271,10 @@ actor ReportCoordinator {
         return ParentIdentityKey(string: remoteHex)?.displayValue ?? remoteHex
     }
 
-    private func fetchModeratorKey(forceRefresh: Bool) async -> String? {
-        if !forceRefresh,
-           let cachedModeratorKey,
-           let expiresAt = moderatorKeyExpiresAt,
-           expiresAt.timeIntervalSinceNow > 0 {
-            return cachedModeratorKey
-        }
-
-        if !forceRefresh,
-           let stored = safetyStore.moderatorPublicKey(),
-           let fetchedAt = safetyStore.moderatorKeyFetchedAt(),
-           Date().timeIntervalSince(fetchedAt) < moderatorCacheDuration {
-            cacheModeratorKey(stored, fetchedAt: fetchedAt)
-            return stored
-        }
-
-        if let moderatorFetchTask {
-            return await moderatorFetchTask.value
-        }
-
-        let task = Task<String?, Never> { [weak self] in
-            guard let self else { return nil }
-            return await self.performModeratorKeyFetch()
-        }
-        moderatorFetchTask = task
-        let key = await task.value
-        moderatorFetchTask = nil
-        return key
-    }
-
-    private func performModeratorKeyFetch() async -> String? {
-        do {
-            let response = try await backendClient.fetchModeratorKey()
-            cacheModeratorKey(response)
-            safetyStore.saveModeratorPublicKey(response)
-            return response
-        } catch {
-            logger.error("Failed to fetch moderator key: \(error.localizedDescription, privacy: .public)")
-            if let fallback = safetyStore.moderatorPublicKey(),
-               let fetchedAt = safetyStore.moderatorKeyFetchedAt() {
-                cacheModeratorKey(fallback, fetchedAt: fetchedAt)
-                return fallback
-            }
-            cacheModeratorKey(nil)
+    private func canonicalChildKey(_ value: String) -> String? {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-    }
-
-    private func cacheModeratorKey(_ key: String?, fetchedAt: Date = Date()) {
-        cachedModeratorKey = key
-        moderatorKeyExpiresAt = key != nil ? fetchedAt.addingTimeInterval(moderatorCacheDuration) : nil
+        return ParentIdentityKey(string: value)?.hex.lowercased()
     }
 }

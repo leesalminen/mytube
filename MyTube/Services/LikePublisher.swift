@@ -7,20 +7,22 @@
 
 import Foundation
 import OSLog
-import NostrSDK
 
 enum LikePublisherError: Error {
     case missingChildProfile
     case missingVideoOwner
     case rateLimitExceeded
+    case parentIdentityMissing
+    case groupUnavailable
 }
 
 /// Publishes like events to Nostr
 actor LikePublisher {
-    private let directMessageOutbox: any DirectMessageSending
+    private let marmotShareService: MarmotShareService
     private let keyStore: KeychainKeyStore
     private let childProfileStore: ChildProfileStore
     private let remoteVideoStore: RemoteVideoStore
+    private let relationshipStore: RelationshipStore
     private let logger = Logger(subsystem: "com.mytube", category: "LikePublisher")
     
     // Rate limiting: 120 likes per hour per child
@@ -28,15 +30,17 @@ actor LikePublisher {
     private let maxLikesPerHour = 120
     
     init(
-        directMessageOutbox: any DirectMessageSending,
+        marmotShareService: MarmotShareService,
         keyStore: KeychainKeyStore,
         childProfileStore: ChildProfileStore,
-        remoteVideoStore: RemoteVideoStore
+        remoteVideoStore: RemoteVideoStore,
+        relationshipStore: RelationshipStore
     ) {
-        self.directMessageOutbox = directMessageOutbox
+        self.marmotShareService = marmotShareService
         self.keyStore = keyStore
         self.childProfileStore = childProfileStore
         self.remoteVideoStore = remoteVideoStore
+        self.relationshipStore = relationshipStore
     }
     
     /// Publish a like for a video
@@ -48,10 +52,22 @@ actor LikePublisher {
         try await checkRateLimit(for: viewerChildNpub)
         
         // Get video owner information
-        let ownerInfo = try await getVideoOwnerInfo(videoId: videoId)
+        let ownerChild = try getVideoOwner(videoId: videoId)
+        guard let viewerHex = childProfileStore.canonicalKey(viewerChildNpub) else {
+            throw LikePublisherError.missingChildProfile
+        }
+        guard let ownerHex = childProfileStore.canonicalKey(ownerChild) else {
+            throw LikePublisherError.missingVideoOwner
+        }
+        let groupId = try resolveGroupId(
+            viewerChildHex: viewerHex,
+            ownerChildHex: ownerHex
+        )
         
         // Get parent key
-        let parentKeyPair = try keyStore.ensureParentKeyPair()
+        guard let parentKeyPair = try keyStore.fetchKeyPair(role: .parent) else {
+            throw LikePublisherError.parentIdentityMissing
+        }
         
         // Create like message
         let message = LikeMessage(
@@ -61,36 +77,10 @@ actor LikePublisher {
             timestamp: Date()
         )
         
-        // Send to owner child device
-        try await directMessageOutbox.sendMessage(
-            message,
-            kind: .like,
-            recipientPublicKey: ownerInfo.ownerChildNpub,
-            additionalTags: [
-                NostrTagBuilder.make(name: "d", value: videoId.uuidString)
-            ],
-            relayOverride: nil,
-            createdAt: Date()
+        try await marmotShareService.publishLike(
+            message: message,
+            mlsGroupId: groupId
         )
-        
-        // Also send to owner's parents
-        for parentNpub in ownerInfo.ownerParentNpubs {
-            do {
-                try await directMessageOutbox.sendMessage(
-                    message,
-                    kind: .like,
-                    recipientPublicKey: parentNpub,
-                    additionalTags: [
-                        NostrTagBuilder.make(name: "d", value: videoId.uuidString)
-                    ],
-                    relayOverride: nil,
-                    createdAt: Date()
-                )
-            } catch {
-                // Log but don't fail if parent notification fails
-                logger.warning("Failed to notify parent \(parentNpub.prefix(8))… about like: \(error)")
-            }
-        }
         
         // Track for rate limiting
         await recordLikeForRateLimit(childNpub: viewerChildNpub)
@@ -108,11 +98,10 @@ actor LikePublisher {
         logger.info("Unlike recorded locally for video \(videoId) from \(viewerChildNpub.prefix(8))…")
     }
     
-    private func getVideoOwnerInfo(videoId: UUID) async throws -> (ownerChildNpub: String, ownerParentNpubs: [String]) {
+    private func getVideoOwner(videoId: UUID) throws -> String {
         do {
             if let remoteVideo = try remoteVideoStore.fetchVideo(videoId: videoId.uuidString) {
-                let parentNpubs = try await getParentNpubs(for: remoteVideo.ownerChild)
-                return (remoteVideo.ownerChild, parentNpubs)
+                return remoteVideo.ownerChild
             }
         } catch {
             logger.error("Failed to load remote video \(videoId) for like publishing: \(error.localizedDescription, privacy: .public)")
@@ -125,10 +114,25 @@ actor LikePublisher {
         throw LikePublisherError.missingVideoOwner
     }
     
-    private func getParentNpubs(for childNpub: String) async throws -> [String] {
-        // In a real implementation, this would look up the parent-child relationships
-        // For now, return empty array as we don't have parent tracking yet
-        return []
+    private func resolveGroupId(
+        viewerChildHex: String,
+        ownerChildHex: String
+    ) throws -> String {
+        if let follow = try relationshipStore.followRelationship(
+            follower: viewerChildHex,
+            target: ownerChildHex
+        ), let groupId = follow.mlsGroupId, !groupId.isEmpty {
+            return groupId
+        }
+
+        if let reverseFollow = try relationshipStore.followRelationship(
+            follower: ownerChildHex,
+            target: viewerChildHex
+        ), let groupId = reverseFollow.mlsGroupId, !groupId.isEmpty {
+            return groupId
+        }
+
+        throw LikePublisherError.groupUnavailable
     }
     
     private func checkRateLimit(for childNpub: String) async throws {
@@ -165,6 +169,10 @@ extension LikePublisherError: LocalizedError {
             return "Child profile not found"
         case .missingVideoOwner:
             return "Video owner information not found"
+        case .parentIdentityMissing:
+            return "Parent identity missing. Complete setup before liking videos."
+        case .groupUnavailable:
+            return "This family connection is not ready for likes yet."
         case .rateLimitExceeded:
             return "Too many likes. Please try again later."
         }

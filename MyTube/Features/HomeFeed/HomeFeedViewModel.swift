@@ -11,12 +11,24 @@ import Foundation
 
 @MainActor
 final class HomeFeedViewModel: NSObject, ObservableObject {
+    struct RemoteShareSummary: Equatable {
+        let availableCount: Int
+        let downloadedCount: Int
+        let lastSharedAt: Date?
+
+        var totalCount: Int { availableCount + downloadedCount }
+        var hasActivity: Bool { totalCount > 0 }
+
+        static let empty = RemoteShareSummary(availableCount: 0, downloadedCount: 0, lastSharedAt: nil)
+    }
+
     @Published private(set) var hero: RankingEngine.RankedVideo?
     @Published private(set) var rankedVideos: [RankingEngine.RankedVideo] = []
     @Published private(set) var shelves: [RankingEngine.Shelf: [RankingEngine.RankedVideo]] = [:]
     @Published private(set) var sharedSections: [SharedRemoteSection] = []
     @Published var presentedRemoteVideo: SharedRemoteVideo?
     @Published private(set) var error: String?
+    @Published private(set) var remoteShareSummary: RemoteShareSummary = .empty
 
     private weak var environment: AppEnvironment?
     private var profile: ProfileModel?
@@ -141,6 +153,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     private func updateSharedVideos() {
         guard let entities = remoteFetchedResultsController?.fetchedObjects else {
             sharedSections = []
+            remoteShareSummary = .empty
             return
         }
 
@@ -149,11 +162,26 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             return makeSharedVideo(from: model)
         }
 
+        var availableCount = 0
+        var downloadedCount = 0
+        var latestShareDate: Date?
+
         let visibleItems = items.filter { item in
             switch item.video.statusValue {
             case .blocked, .reported, .deleted:
                 return false
             default:
+                switch item.video.statusValue {
+                case .available, .downloading:
+                    availableCount += 1
+                case .downloaded:
+                    downloadedCount += 1
+                default:
+                    break
+                }
+                if latestShareDate == nil || item.video.createdAt > (latestShareDate ?? .distantPast) {
+                    latestShareDate = item.video.createdAt
+                }
                 return true
             }
         }
@@ -172,6 +200,11 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         }
 
         sharedSections = sections
+        remoteShareSummary = RemoteShareSummary(
+            availableCount: availableCount,
+            downloadedCount: downloadedCount,
+            lastSharedAt: latestShareDate
+        )
 
         if sections.isEmpty {
             presentedRemoteVideo = nil

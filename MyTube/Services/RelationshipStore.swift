@@ -83,7 +83,8 @@ final class RelationshipStore {
     func upsertFollow(
         message: FollowMessage,
         updatedAt: Date,
-        participantKeys: [String] = []
+        participantKeys: [String] = [],
+        mlsGroupId: String? = nil
     ) throws -> FollowModel {
         let context = persistence.newBackgroundContext()
         let followerKey = canonicalPublicKey(message.followerChild)
@@ -160,7 +161,8 @@ final class RelationshipStore {
                 let metadata = self.encodeFollowMetadata(
                     canonicalMessage,
                     previous: existingMetadata,
-                    additionalParentKeys: participantKeys
+                    additionalParentKeys: participantKeys,
+                    mlsGroupId: mlsGroupId
                 )
                 entity.metadataJSON = metadata
 
@@ -193,11 +195,15 @@ final class RelationshipStore {
     private func encodeFollowMetadata(
         _ message: FollowMessage,
         previous: FollowRecordMetadata?,
-        additionalParentKeys: [String]
+        additionalParentKeys: [String],
+        mlsGroupId: String?
     ) -> String {
         var record = previous ?? FollowRecordMetadata(lastMessage: message)
         record.ingest(message: message)
         record.addParticipants(additionalParentKeys)
+        if let mlsGroupId {
+            record.mlsGroupId = mlsGroupId
+        }
         return record.encode(using: encoder) ?? "{}"
     }
 

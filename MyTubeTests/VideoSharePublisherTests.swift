@@ -6,19 +6,15 @@
 //
 
 import XCTest
-import CryptoKit
-import NostrSDK
 @testable import MyTube
 
 final class VideoSharePublisherTests: XCTestCase {
     private var tempURL: URL!
     private var storagePaths: StoragePaths!
     private var persistence: PersistenceController!
-    private var parentProfileStore: ParentProfileStore!
     private var keyStore: KeychainKeyStore!
     private var cryptoService: CryptoEnvelopeService!
     private var storageClient: StubStorageClient!
-    private var directMessageOutbox: StubDirectMessageOutbox!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -26,11 +22,9 @@ final class VideoSharePublisherTests: XCTestCase {
         try FileManager.default.createDirectory(at: tempURL, withIntermediateDirectories: true)
         storagePaths = try StoragePaths(baseURL: tempURL)
         persistence = PersistenceController(inMemory: true)
-        parentProfileStore = ParentProfileStore(persistence: persistence)
         keyStore = KeychainKeyStore(service: "VideoSharePublisherTests.\(UUID().uuidString)")
         cryptoService = CryptoEnvelopeService()
         storageClient = StubStorageClient()
-        directMessageOutbox = StubDirectMessageOutbox()
     }
 
     override func tearDownWithError() throws {
@@ -39,100 +33,54 @@ final class VideoSharePublisherTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testShareWrapsMediaKeyWhenRecipientHasWrapKey() async throws {
+    func testMakeShareMessageEmbedsMediaKey() async throws {
         let publisher = VideoSharePublisher(
             storagePaths: storagePaths,
             cryptoService: cryptoService,
             storageClient: storageClient,
-            directMessageOutbox: directMessageOutbox,
-            keyStore: keyStore,
-            parentProfileStore: parentProfileStore
+            keyStore: keyStore
         )
 
         let profileId = UUID()
         let video = try makeVideoModel(profileId: profileId)
-        let remoteKeys = NostrSDK.Keys.generate()
-        let recipientHex = remoteKeys.publicKey().toHex()
+        _ = try keyStore.ensureParentKeyPair()
 
-        let wrapKey = Curve25519.KeyAgreement.PrivateKey()
-        _ = try parentProfileStore.upsertProfile(
-            publicKey: recipientHex.lowercased(),
-            name: "Remote Parent",
-            displayName: nil,
-            about: nil,
-            pictureURLString: nil,
-            wrapPublicKey: wrapKey.publicKey.rawRepresentation,
-            updatedAt: Date()
-        )
-
-        _ = try await publisher.share(
+        let message = try await publisher.makeShareMessage(
             video: video,
-            ownerChildNpub: "npub1childowner",
-            recipientPublicKey: recipientHex
-        )
-
-        let dmPayload1 = try await directMessageOutbox.lastPayload()
-        let decoded1 = try JSONDecoder().decode(VideoShareMessage.self, from: dmPayload1)
-        XCTAssertNil(decoded1.crypto.mediaKey)
-        XCTAssertEqual(decoded1.crypto.algWrap, cryptoService.wrapAlgorithmIdentifier)
-        XCTAssertNotNil(decoded1.crypto.wrap)
-
-        // Share to a second recipient with its own wrap key; uploads should be reused.
-        let remoteKeysB = NostrSDK.Keys.generate()
-        let recipientHexB = remoteKeysB.publicKey().toHex()
-        let wrapKeyB = Curve25519.KeyAgreement.PrivateKey()
-        _ = try parentProfileStore.upsertProfile(
-            publicKey: recipientHexB.lowercased(),
-            name: "Second Parent",
-            displayName: nil,
-            about: nil,
-            pictureURLString: nil,
-            wrapPublicKey: wrapKeyB.publicKey.rawRepresentation,
-            updatedAt: Date()
-        )
-
-        _ = try await publisher.share(
-            video: video,
-            ownerChildNpub: "npub1childowner",
-            recipientPublicKey: recipientHexB
-        )
-
-        let dmPayload2 = try await directMessageOutbox.lastPayload()
-        let decoded2 = try JSONDecoder().decode(VideoShareMessage.self, from: dmPayload2)
-        XCTAssertNil(decoded2.crypto.mediaKey)
-        XCTAssertEqual(decoded2.crypto.algWrap, cryptoService.wrapAlgorithmIdentifier)
-        XCTAssertNotNil(decoded2.crypto.wrap)
-
-        let uploadCount = await storageClient.uploadInvocationCount()
-        XCTAssertEqual(uploadCount, 2, "Expected a single media + thumbnail upload reused for both recipients.")
-
-        let dmCount = await directMessageOutbox.payloadCount()
-        XCTAssertEqual(dmCount, 2)
-    }
-
-    func testShareFallsBackToMediaKeyWithoutWrapKey() async throws {
-        let publisher = VideoSharePublisher(
-            storagePaths: storagePaths,
-            cryptoService: cryptoService,
-            storageClient: storageClient,
-            directMessageOutbox: directMessageOutbox,
-            keyStore: keyStore,
-            parentProfileStore: parentProfileStore
-        )
-
-        let profileId = UUID()
-        let video = try makeVideoModel(profileId: profileId)
-        let remoteKeys = NostrSDK.Keys.generate()
-        let recipientHex = remoteKeys.publicKey().toHex()
-
-        let message = try await publisher.share(
-            video: video,
-            ownerChildNpub: "npub1childowner",
-            recipientPublicKey: recipientHex
+            ownerChildNpub: "npub1childowner"
         )
 
         XCTAssertNotNil(message.crypto.mediaKey)
         XCTAssertNil(message.crypto.wrap)
+        XCTAssertEqual(message.crypto.algMedia, cryptoService.mediaAlgorithmIdentifier)
+    }
+
+    func testMakeShareMessageReusesUploadsForSameVideo() async throws {
+        let publisher = VideoSharePublisher(
+            storagePaths: storagePaths,
+            cryptoService: cryptoService,
+            storageClient: storageClient,
+            keyStore: keyStore
+        )
+
+        let profileId = UUID()
+        let video = try makeVideoModel(profileId: profileId)
+        _ = try keyStore.ensureParentKeyPair()
+
+        let first = try await publisher.makeShareMessage(
+            video: video,
+            ownerChildNpub: "npub1childowner"
+        )
+
+        let second = try await publisher.makeShareMessage(
+            video: video,
+            ownerChildNpub: "npub1childowner"
+        )
+
+        let uploadCount = await storageClient.uploadInvocationCount()
+        XCTAssertEqual(uploadCount, 2, "Expected a single media and thumbnail upload reused across shares.")
+        XCTAssertEqual(first.blob.url, second.blob.url)
+        XCTAssertEqual(first.thumb.url, second.thumb.url)
     }
 
     private func makeVideoModel(profileId: UUID) throws -> VideoModel {
@@ -196,49 +144,5 @@ actor StubStorageClient: MediaStorageClient {
 
     func uploadInvocationCount() async -> Int {
         uploadCount
-    }
-}
-
-actor StubDirectMessageOutbox: DirectMessageSending {
-    private let encoder = JSONEncoder()
-    private var payloads: [Data] = []
-    private let signer = NostrEventSigner()
-
-    enum Error: Swift.Error {
-        case noPayload
-    }
-
-    @discardableResult
-    func sendMessage<Payload>(
-        _ message: Payload,
-        kind: DirectMessageKind,
-        recipientPublicKey: String,
-        additionalTags: [Tag],
-        relayOverride: [URL]?,
-        createdAt: Date
-    ) async throws -> NostrEvent where Payload: Encodable {
-        let data = try encoder.encode(message)
-        payloads.append(data)
-
-        let secret = NostrSDK.SecretKey.generate()
-        let keyPair = try NostrKeyPair(secretKey: secret)
-        return try signer.makeEvent(
-            kind: .directMessage,
-            tags: [],
-            content: "stub",
-            keyPair: keyPair,
-            createdAt: createdAt
-        )
-    }
-
-    func lastPayload() async throws -> Data {
-        guard let data = payloads.last else {
-            throw Error.noPayload
-        }
-        return data
-    }
-
-    func payloadCount() async -> Int {
-        payloads.count
     }
 }

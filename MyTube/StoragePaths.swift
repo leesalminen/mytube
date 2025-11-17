@@ -74,6 +74,17 @@ final class StoragePaths {
         try ensureBaseDirectories()
     }
 
+    /// Returns the filesystem URL used by MDK for its SQLite backing store.
+    /// The file lives directly under the protected Application Support/MyTube directory.
+    func mdkDatabaseURL() -> URL {
+        baseURL.appendingPathComponent("mdk.sqlite", isDirectory: false)
+    }
+
+    /// Stores inbound parent key packages that still need approval.
+    func parentKeyPackageCacheURL() -> URL {
+        baseURL.appendingPathComponent("parent-key-packages.json", isDirectory: false)
+    }
+
     private func ensureBaseDirectories() throws {
         try ensureDirectoryExists(at: baseURL)
 

@@ -32,6 +32,7 @@ final class ProfileStore: ObservableObject {
         entity.name = name
         entity.theme = theme.rawValue
         entity.avatarAsset = avatarAsset
+        entity.mlsGroupId = nil
         try persistence.viewContext.save()
         guard let model = ProfileModel(entity: entity) else {
             throw ProfileStoreError.entityMissing
@@ -49,6 +50,18 @@ final class ProfileStore: ObservableObject {
         entity.name = model.name
         entity.theme = model.theme.rawValue
         entity.avatarAsset = model.avatarAsset
+        entity.mlsGroupId = model.mlsGroupId
+        try persistence.viewContext.save()
+    }
+
+    func updateGroupId(_ groupId: String?, forProfileId profileId: UUID) throws {
+        let request = ProfileEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", profileId as CVarArg)
+        request.fetchLimit = 1
+        guard let entity = try persistence.viewContext.fetch(request).first else {
+            throw ProfileStoreError.entityMissing
+        }
+        entity.mlsGroupId = groupId
         try persistence.viewContext.save()
     }
 }

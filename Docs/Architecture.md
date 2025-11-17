@@ -39,14 +39,14 @@ Persistence (Core Data, StoragePaths, Keychain) ── Data Layer
 ### 2.2 Cross-Device Sharing Pipeline
 1. **VideoShareCoordinator** listens for new `VideoEntity` inserts and fetches current follow approvals from `RelationshipStore`. It reuses cached relationships and will retry queued videos when approvals arrive.
 2. **VideoSharePublisher** encrypts the media with XChaCha20-Poly1305, uploads blobs directly to MinIO (signed PUT), and constructs a `VideoShareMessage`.
-3. The message is delivered to remote parents via `DirectMessageOutbox` (NIP-44 DM) and persisted to `RemoteVideoEntity` by `NostrEventReducer`.
+3. `MarmotShareService` hands the JSON payload to `MarmotTransport`, which publishes the MDK rumor (plus any welcome gift wraps) to the relays backing that child’s group. Legacy direct-message delivery has been removed; inbound history will soon be sourced from MDK’s local database instead of the deprecated reducer.
 4. **RemoteVideoDownloader** decrypts and caches the shared media locally on demand (under `Media/Shared`), tracking status, errors, and last-downloaded timestamps in Core Data.
 
 ### 2.3 Relationship & Follow Management
-1. **FollowCoordinator** issues or approves follow requests. It wraps outbound DMs, publishes follow pointer events, and records remote parent keys for later reconciliation.
-2. **RelationshipStore** stores `FollowEntity` records in Core Data and exposes a `CurrentValueSubject` of normalized `FollowModel`s. It deduplicates variants (hex vs npub) and tracks all participating parent keys.
-3. **SyncCoordinator** maintains relay connections, rebuilds primary subscriptions using tracked child and parent keys, and streams events into `NostrEventReducer`.
-4. **NostrEventReducer** decrypts NIP-44 payloads, updates `RelationshipStore` (including participant keys), and persists remote video state.
+1. **GroupMembershipCoordinator** issues Marmot/MDK group operations: it creates per-child MLS groups, adds remote parents via `addMembers`, wraps welcomes through `MarmotTransport`, and now removes members (revoke/block) through MDK’s `removeMembers` API.
+2. **RelationshipStore** stores `FollowEntity` records in Core Data and exposes a `CurrentValueSubject` of normalized `FollowModel`s. It deduplicates variants (hex vs npub), tracks participant keys, and records the `mlsGroupId` tied to each child/parent relationship.
+3. **SyncCoordinator** maintains relay connections, subscribes to Marmot kinds (key packages, welcomes, group commits, gift wraps), and fans events out to `MarmotTransport` plus the pared-down `NostrEventReducer`.
+4. **NostrEventReducer** now only handles replaceables (metadata, follow pointers, tombstones). All encrypted messaging moved to MDK, and a future Marmot projection layer will replace the remaining Core Data ingest.
 
 ---
 
@@ -71,19 +71,19 @@ Persistence (Core Data, StoragePaths, Keychain) ── Data Layer
 | **NIP-01** (base protocol) | Event signing/verification, relay subscriptions. | `NostrEventSigner`, `URLSessionNostrClient`. |
 | **NIP-19** (bech32 identifiers) | Encoding/decoding `npub`/`nsec` keys for parent/child sharing and input validation. | `Services/Nostr/NIP19.swift`, `ParentIdentityKey`, `IdentityManager`. |
 | **NIP-26** (delegations) | Parent delegates limited permissions to child devices; delegation tags exported in onboarding. | `IdentityManager.issueDelegation`, `NostrEventSigner`, Parent Zone onboarding UI. |
-| **NIP-33** (parameterized replaceables) | Follow pointer events (`kind 30301`) and video tombstones (`kind 30302`) use `d` tags for replaceable semantics. | `NostrModels`, `FollowCoordinator.publishFollowPointer`, `NostrEventReducer`. |
-| **NIP-44 v2** (encrypted DMs) | All direct messages (follow approvals, video share payloads) use the v2 envelope supplied by `nostr-sdk-swift`. | `CryptoEnvelopeService`, `DirectMessageOutbox`, `NostrEventReducer`. |
+| **NIP-33** (parameterized replaceables) | Video tombstones (`kind 30302`) still use `d` tags; legacy follow pointers (`kind 30301`) have been replaced by Marmot/MDK groups. | `NostrModels`, `NostrEventReducer`. |
+| **NIP-59 gift wraps (NIP-44 envelopes inside)** | Marmot welcomes and rumor fan-out use NIP-59 gift wraps that embed the NIP-44 envelope; `CryptoEnvelopeService` handles the wrapping/unwrapping for `MarmotTransport`. | `CryptoEnvelopeService`, `MarmotTransport`. |
 | **Planned/Partial:** NIP-65 (relay metadata), NIP-98 (HTTP auth), NIP-59 (gift wraps) | Mentioned in docs but not yet implemented in code. |
 
 Additional protocol notes:
 - Custom kinds `30301` and `30302` follow the NIP-33 pattern with `d` tags for deterministic replacement.
-- DM decrypt failures currently show `invalid HMAC` for some partner devices; this is an active follow-up in the project tracker.
+- Gift-wrap decrypt failures (NIP-59) currently show `invalid HMAC` for some partner devices; this is an active follow-up in the project tracker.
 
 ---
 
 ## 5. Local/Remote Security Considerations
 
-- Media blobs are encrypted per-share with a unique 32-byte key; the key is embedded directly in the DM payload (and wrapped legacy fields retained for backwards compatibility).
+- Media blobs are encrypted per-share with a unique 32-byte key; the key lives inside the `VideoShareMessage` payload that MDK encrypts/gift-wraps for transport.
 - All local files under `StoragePaths` inherit iOS complete file protection, and writes occur on background queues with atomic semantics.
 - Outbound HTTP uploads to MinIO use SigV4-signed `PUT` requests; downloads rely on authenticated URLs stored in `VideoShareMessage`.
 - Parent/child keypairs are generated via `nostr-sdk-swift` and stored in Keychain; biometric requirements are currently disabled for parent keys to support background decrypt.
@@ -92,10 +92,11 @@ Additional protocol notes:
 
 ## 6. Future Enhancements
 
-1. **NIP-44 Reliability:** Investigate remaining HMAC failures when decrypting partner DMs (likely due to mismatched derivation or stale keys).
+1. **Marmot Projection:** Finish the Core Data projection that reads MDK groups/messages so remote shelves, likes, and reports no longer rely on the removed direct-message reducer.
 2. **Follow Reconciliation:** Add jobs that backfill follow pointers on launch, revalidate dual approvals, and clear stale pending states.
 3. **Analytics & Telemetry:** Surface relay health and subscription metrics in Parent Zone diagnostics for easier troubleshooting.
-4. **Documentation & Support:** Extend this document with sequence diagrams and add a “multi-device troubleshooting” section once the DM fix ships.
+4. **Documentation & Support:** Extend this document with Marmot sequence diagrams (gift-wraps, welcome approvals) and add “multi-device troubleshooting” once the projection work lands.
+5. **Safety Group Rollout:** Document and stand up the shared “Safety HQ” MDK group that every parent joins so moderation reports can fan out without reviving legacy direct-messaging plumbing.
 
 ---
 

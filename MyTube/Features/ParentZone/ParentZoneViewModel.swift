@@ -7,15 +7,87 @@
 
 import Combine
 import Foundation
+import MDKBindings
+import NostrSDK
 import OSLog
+
+struct MarmotDiagnostics: Equatable {
+    let groupCount: Int
+    let pendingWelcomes: Int
+
+    static let empty = MarmotDiagnostics(groupCount: 0, pendingWelcomes: 0)
+}
 
 @MainActor
 final class ParentZoneViewModel: ObservableObject {
+    struct PendingWelcomeItem: Identifiable, Equatable {
+        let welcome: Welcome
+
+        var id: String { welcome.id }
+        var groupName: String {
+            let name = welcome.groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? "New Group" : name
+        }
+        var groupDescription: String? {
+            let description = welcome.groupDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            return description.isEmpty ? nil : description
+        }
+        var welcomerKey: String { welcome.welcomer }
+        var relayList: [String] { welcome.groupRelays }
+        var memberCount: Int { Int(welcome.memberCount) }
+        var adminCount: Int { welcome.groupAdminPubkeys.count }
+
+        var relaySummary: String? {
+            guard !relayList.isEmpty else { return nil }
+            if relayList.count <= 2 {
+                return relayList.joined(separator: ", ")
+            }
+            let prefix = relayList.prefix(2).joined(separator: ", ")
+            return "\(prefix) +\(relayList.count - 2) more"
+        }
+    }
+
+    struct GroupSummary: Equatable {
+        let id: String
+        let name: String
+        let description: String
+        let state: String
+        let memberCount: Int
+        let adminCount: Int
+        let relayCount: Int
+        let lastMessageAt: Date?
+
+        var displayName: String {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Family Group" : trimmed
+        }
+
+        var isActive: Bool {
+            state.lowercased() == "active"
+        }
+    }
+
+    struct RemoteShareStats: Equatable {
+        let availableCount: Int
+        let revokedCount: Int
+        let deletedCount: Int
+        let blockedCount: Int
+        let lastSharedAt: Date?
+
+        var totalCount: Int {
+            availableCount + revokedCount + deletedCount + blockedCount
+        }
+
+        var hasAvailableShares: Bool {
+            availableCount > 0
+        }
+    }
+
     enum ShareFlowError: LocalizedError {
         case parentIdentityMissing
         case childProfileMissing
         case childKeyMissing(name: String)
-        case noApprovedFollowers
+        case noApprovedFamilies
 
         var errorDescription: String? {
             switch self {
@@ -25,8 +97,8 @@ final class ParentZoneViewModel: ObservableObject {
                 return "Could not locate the child's profile for this video. Refresh Parent Zone and try again."
             case .childKeyMissing(let name):
                 return "Create or import a key for \(name) before sending secure shares."
-            case .noApprovedFollowers:
-                return "Approve a follow from this parent before sharing videos."
+            case .noApprovedFamilies:
+                return "Accept a Marmot invite from this family before sharing videos."
             }
         }
     }
@@ -52,6 +124,8 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var storageMode: StorageModeSelection = .managed
     @Published var entitlement: CloudEntitlement?
     @Published var isRefreshingEntitlement = false
+    @Published var marmotDiagnostics: MarmotDiagnostics = .empty
+    @Published var isRefreshingMarmotDiagnostics = false
     @Published var byoEndpoint: String = ""
     @Published var byoBucket: String = ""
     @Published var byoRegion: String = ""
@@ -59,14 +133,25 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var byoSecretKey: String = ""
     @Published var byoPathStyle: Bool = true
     @Published var backendEndpoint: String = ""
+    @Published private(set) var pendingWelcomes: [PendingWelcomeItem] = []
+    @Published var isRefreshingPendingWelcomes = false
+    @Published private(set) var welcomeActionsInFlight: Set<String> = []
+    @Published private(set) var groupSummaries: [String: GroupSummary] = [:]
+    @Published private(set) var shareStatsByChild: [String: RemoteShareStats] = [:]
 
     private let environment: AppEnvironment
     private let parentAuth: ParentAuth
+    private let parentKeyPackageStore: ParentKeyPackageStore
+    private let welcomeClient: any WelcomeHandling
     private var delegationCache: [UUID: ChildDelegation] = [:]
     private var lastCreatedChildID: UUID?
     private var childKeyLookup: [String: ChildIdentityItem] = [:]
+    private var pendingParentKeyPackages: [String: [String]]
+    private var latestParentKeyPackage: String?
+    private let eventSigner = NostrEventSigner()
     private var cancellables: Set<AnyCancellable> = []
     private var localParentKeyVariants: Set<String> = []
+    private var marmotObservers: [NSObjectProtocol] = []
     private let logger = Logger(subsystem: "com.mytube", category: "ParentZoneViewModel")
     private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
@@ -77,9 +162,12 @@ final class ParentZoneViewModel: ObservableObject {
         return formatter
     }()
 
-    init(environment: AppEnvironment) {
+    init(environment: AppEnvironment, welcomeClient: (any WelcomeHandling)? = nil) {
         self.environment = environment
         self.parentAuth = environment.parentAuth
+        self.parentKeyPackageStore = environment.parentKeyPackageStore
+        self.welcomeClient = welcomeClient ?? environment.mdkActor
+        self.pendingParentKeyPackages = environment.parentKeyPackageStore.allPackages()
         self.storageMode = environment.storageModeSelection
 
         loadStoredBYOConfig()
@@ -111,6 +199,14 @@ final class ParentZoneViewModel: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        observeMarmotNotifications()
+    }
+
+    deinit {
+        for observer in marmotObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     var needsSetup: Bool {
@@ -436,13 +532,6 @@ final class ParentZoneViewModel: ObservableObject {
             loadIdentities()
         }
 
-        guard ParentIdentityKey(string: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex) != nil else {
-            throw ShareFlowError.parentIdentityMissing
-        }
-        guard ParentIdentityKey(string: recipientPublicKey) != nil else {
-            throw VideoSharePublisherError.invalidRecipientKey
-        }
-
         guard let childItem = childIdentities.first(where: { $0.id == video.profileId }) else {
             throw ShareFlowError.childProfileMissing
         }
@@ -450,16 +539,33 @@ final class ParentZoneViewModel: ObservableObject {
             throw ShareFlowError.childKeyMissing(name: childItem.displayName)
         }
 
-        guard isApprovedParent(recipientPublicKey, forChild: video.profileId) else {
-            throw ShareFlowError.noApprovedFollowers
+        guard let remoteParent = ParentIdentityKey(string: recipientPublicKey) else {
+            throw VideoSharePublisherError.invalidRecipientKey
+        }
+
+        guard let follow = followRelationship(
+            for: video.profileId,
+            childIdentity: identity,
+            remoteParent: remoteParent,
+            localParentHex: parentIdentity.publicKeyHex
+        ) else {
+            throw ShareFlowError.noApprovedFamilies
+        }
+
+        guard let groupId = resolvedGroupId(for: follow) else {
+            throw GroupMembershipWorkflowError.groupIdentifierMissing
         }
 
         let ownerChild = identity.publicKeyBech32 ?? identity.publicKeyHex
-        return try await environment.videoSharePublisher.share(
+        let message = try await environment.videoSharePublisher.makeShareMessage(
             video: video,
-            ownerChildNpub: ownerChild,
-            recipientPublicKey: recipientPublicKey
+            ownerChildNpub: ownerChild
         )
+        _ = try await environment.marmotShareService.publishVideoShare(
+            message: message,
+            mlsGroupId: groupId
+        )
+        return message
     }
 
     func ensureRelayConnection(
@@ -492,6 +598,37 @@ final class ParentZoneViewModel: ObservableObject {
         loadRelationships()
         loadStoredBYOConfig()
         refreshEntitlement()
+        refreshMarmotDiagnostics()
+        refreshGroupSummaries()
+        refreshRemoteShareStats()
+        refreshParentKeyPackageIfNeeded()
+        Task {
+            await refreshPendingWelcomes()
+        }
+    }
+
+    private func refreshParentKeyPackageIfNeeded() {
+        guard latestParentKeyPackage == nil else { return }
+        Task {
+            await generateParentKeyPackage()
+        }
+    }
+
+    private func generateParentKeyPackage() async {
+        do {
+            let parentIdentity = try ensureParentIdentityLoaded()
+            let relays = await environment.relayDirectory.currentRelayURLs()
+            guard !relays.isEmpty else { return }
+            let relayStrings = relays.map(\.absoluteString)
+            let keyPackage = try await createParentKeyPackage(
+                relays: relays,
+                relayStrings: relayStrings,
+                parentIdentity: parentIdentity
+            )
+            latestParentKeyPackage = keyPackage
+        } catch {
+            logger.error("Unable to refresh parent key package: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private func updateCache(with video: VideoModel) {
@@ -661,6 +798,26 @@ final class ParentZoneViewModel: ObservableObject {
         }
     }
 
+    func groupSummary(for follow: FollowModel) -> GroupSummary? {
+        guard let groupId = resolvedGroupId(for: follow) else { return nil }
+        return groupSummaries[groupId]
+    }
+
+    func groupSummary(for child: ChildIdentityItem) -> GroupSummary? {
+        guard let groupId = child.profile.mlsGroupId else { return nil }
+        return groupSummaries[groupId]
+    }
+
+    func shareStats(for follow: FollowModel) -> RemoteShareStats? {
+        guard follow.status == .active else { return nil }
+        guard let key = remoteChildKey(for: follow) else { return nil }
+        return shareStatsByChild[key]
+    }
+
+    func totalAvailableRemoteShares() -> Int {
+        shareStatsByChild.values.reduce(0) { $0 + $1.availableCount }
+    }
+
     func inboundReports() -> [ReportModel] {
         reports.filter { !$0.isOutbound }
     }
@@ -705,7 +862,10 @@ final class ParentZoneViewModel: ObservableObject {
 
     func unblockFamily(for follow: FollowModel) {
         Task {
-            guard let remoteKey = remoteParentKey(for: follow) else {
+            guard
+                let remoteKeyValue = remoteParentKey(for: follow),
+                let remoteParent = ParentIdentityKey(string: remoteKeyValue)
+            else {
                 await MainActor.run {
                     self.errorMessage = "Could not determine remote parent key to unblock."
                 }
@@ -713,15 +873,19 @@ final class ParentZoneViewModel: ObservableObject {
             }
 
             do {
-                _ = try await environment.followCoordinator.revokeFollow(
+                try await removeParentFromGroup(
                     follow: follow,
-                    remoteParentKey: remoteKey,
-                    now: Date()
+                    remoteParent: remoteParent,
+                    newStatus: .revoked
                 )
+                await MainActor.run {
+                    self.errorMessage = nil
+                }
             } catch {
                 await MainActor.run {
                     self.errorMessage = error.localizedDescription
                 }
+                refreshRelaysOnConnectivityError(error)
             }
         }
     }
@@ -760,6 +924,29 @@ final class ParentZoneViewModel: ObservableObject {
         }
 
         return keys.sorted()
+    }
+
+    private func followRelationship(
+        for childId: UUID,
+        childIdentity: ChildIdentity,
+        remoteParent: ParentIdentityKey,
+        localParentHex: String
+    ) -> FollowModel? {
+        let childVariants = Set(normalizedKeyVariants(childIdentity.publicKeyHex))
+        let remoteHex = remoteParent.hex.lowercased()
+
+        for follow in followRelationships where follow.isFullyApproved {
+            let followerVariants = Set(normalizedKeyVariants(follow.followerChild))
+            let targetVariants = Set(normalizedKeyVariants(follow.targetChild))
+            guard !childVariants.isDisjoint(with: followerVariants) || !childVariants.isDisjoint(with: targetVariants) else {
+                continue
+            }
+            let remoteParents = follow.remoteParentKeys(localParentHex: localParentHex)
+            if remoteParents.contains(where: { $0.caseInsensitiveCompare(remoteHex) == .orderedSame }) {
+                return follow
+            }
+        }
+        return nil
     }
 
     func isApprovedParent(_ key: String, forChild childId: UUID) -> Bool {
@@ -823,12 +1010,136 @@ final class ParentZoneViewModel: ObservableObject {
             return nil
         }
 
+        guard let keyPackage = latestParentKeyPackage else {
+            return nil
+        }
+
         return FollowInvite(
-            version: 1,
+            version: 2,
             childName: child.profile.name,
             childPublicKey: childPublic,
-            parentPublicKey: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex
+            parentPublicKey: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex,
+            parentKeyPackages: [keyPackage]
         )
+    }
+
+    func storePendingKeyPackages(from invite: FollowInvite) {
+        guard
+            let packages = invite.parentKeyPackages,
+            !packages.isEmpty,
+            let normalizedParent = ParentIdentityKey(string: invite.parentPublicKey)?.hex.lowercased()
+        else {
+            return
+        }
+        pendingParentKeyPackages[normalizedParent] = packages
+        parentKeyPackageStore.save(packages: packages, forParentKey: normalizedParent)
+    }
+
+    func hasPendingKeyPackages(for parentKey: String) -> Bool {
+        guard let normalized = ParentIdentityKey(string: parentKey)?.hex.lowercased() else {
+            return false
+        }
+        guard let packages = pendingParentKeyPackages[normalized] else {
+            return false
+        }
+        return !packages.isEmpty
+    }
+
+    @discardableResult
+    private func inviteParentToGroup(
+        child: ChildIdentityItem,
+        identity: ChildIdentity,
+        keyPackages: [String],
+        normalizedParentKey: String
+    ) async throws -> String {
+        try await ensureChildGroup(for: identity, preferredName: child.displayName)
+        guard
+            let refreshed = childIdentities.first(where: { $0.id == child.id }),
+            let groupId = refreshed.profile.mlsGroupId
+        else {
+            throw GroupMembershipWorkflowError.groupIdentifierMissing
+        }
+        let relayOverride = await environment.relayDirectory.currentRelayURLs()
+        let request = GroupMembershipCoordinator.AddMembersRequest(
+            mlsGroupId: groupId,
+            keyPackageEventsJson: keyPackages,
+            relayOverride: relayOverride
+        )
+        _ = try await environment.groupMembershipCoordinator.addMembers(request: request)
+        pendingParentKeyPackages.removeValue(forKey: normalizedParentKey)
+        parentKeyPackageStore.removePackages(forParentKey: normalizedParentKey)
+        return groupId
+    }
+
+    private func recordFollowUpdate(
+        followerChild: String,
+        targetChild: String,
+        approvedFrom: Bool,
+        approvedTo: Bool,
+        status: FollowModel.Status,
+        actorKey: String,
+        participantKeys: [String],
+        mlsGroupId: String?
+    ) throws {
+        let now = Date()
+        let message = FollowMessage(
+            followerChild: followerChild,
+            targetChild: targetChild,
+            approvedFrom: approvedFrom,
+            approvedTo: approvedTo,
+            status: status.rawValue,
+            by: actorKey,
+            timestamp: now
+        )
+        let updated = try environment.relationshipStore.upsertFollow(
+            message: message,
+            updatedAt: now,
+            participantKeys: participantKeys,
+            mlsGroupId: mlsGroupId
+        )
+        upsertFollow(updated)
+    }
+
+    private func resolvedGroupId(for follow: FollowModel) -> String? {
+        if let stored = follow.mlsGroupId, !stored.isEmpty {
+            return stored
+        }
+        if let follower = followerProfile(for: follow)?.profile.mlsGroupId {
+            return follower
+        }
+        if let target = targetProfile(for: follow)?.profile.mlsGroupId {
+            return target
+        }
+        return nil
+    }
+
+    private func removeParentFromGroup(
+        follow: FollowModel,
+        remoteParent: ParentIdentityKey,
+        newStatus: FollowModel.Status
+    ) async throws {
+        let parentIdentity = try ensureParentIdentityLoaded()
+        guard let groupId = resolvedGroupId(for: follow) else {
+            throw GroupMembershipWorkflowError.groupIdentifierMissing
+        }
+        let relayOverride = await environment.relayDirectory.currentRelayURLs()
+        let request = GroupMembershipCoordinator.RemoveMembersRequest(
+            mlsGroupId: groupId,
+            memberPublicKeys: [remoteParent.hex.lowercased()],
+            relayOverride: relayOverride.isEmpty ? nil : relayOverride
+        )
+        _ = try await environment.groupMembershipCoordinator.removeMembers(request: request)
+        try recordFollowUpdate(
+            followerChild: follow.followerChild,
+            targetChild: follow.targetChild,
+            approvedFrom: false,
+            approvedTo: false,
+            status: newStatus,
+            actorKey: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex,
+            participantKeys: [remoteParent.displayValue],
+            mlsGroupId: groupId
+        )
+        loadRelationships()
     }
 
     @discardableResult
@@ -855,6 +1166,11 @@ final class ParentZoneViewModel: ObservableObject {
             errorMessage = message
             return message
         }
+        guard let followerIdentity = followerItem.identity else {
+            let message = "Generate a key for \(followerItem.displayName) before sending invites."
+            errorMessage = message
+            return message
+        }
         guard isValidParentKey(trimmedTargetParent) else {
             let message = "Enter a valid parent public key (npub… or 64-char hex)."
             errorMessage = message
@@ -870,7 +1186,7 @@ final class ParentZoneViewModel: ObservableObject {
             return message
         }
 
-        guard let localParentKey = ParentIdentityKey(string: localIdentity.publicKeyBech32 ?? localIdentity.publicKeyHex) else {
+        guard ParentIdentityKey(string: localIdentity.publicKeyBech32 ?? localIdentity.publicKeyHex) != nil else {
             let message = "Parent identity is malformed. Recreate your parent key and try again."
             errorMessage = message
             return message
@@ -881,19 +1197,44 @@ final class ParentZoneViewModel: ObservableObject {
             return message
         }
 
+        let normalizedRemoteParent = remoteParentKey.hex.lowercased()
+        guard let keyPackages = pendingParentKeyPackages[normalizedRemoteParent], !keyPackages.isEmpty else {
+            let message = GroupMembershipWorkflowError.keyPackageMissing.errorDescription ?? "Scan the other parent's Marmot invite before sending a request."
+            errorMessage = message
+            return message
+        }
+
+        let groupId: String
         do {
-            let updated = try await environment.followCoordinator.requestFollow(
-                followerProfile: followerItem.profile,
-                targetChildKey: trimmedTargetChild,
-                targetParentKey: trimmedTargetParent
+            groupId = try await inviteParentToGroup(
+                child: followerItem,
+                identity: followerIdentity,
+                keyPackages: keyPackages,
+                normalizedParentKey: normalizedRemoteParent
             )
-            upsertFollow(updated)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            errorMessage = message
+            return message
+        }
+
+        do {
+            try recordFollowUpdate(
+                followerChild: followerIdentity.keyPair.publicKeyHex,
+                targetChild: trimmedTargetChild,
+                approvedFrom: true,
+                approvedTo: false,
+                status: .pending,
+                actorKey: localIdentity.publicKeyBech32 ?? localIdentity.publicKeyHex,
+                participantKeys: [remoteParentKey.displayValue],
+                mlsGroupId: groupId
+            )
             errorMessage = nil
             loadIdentities()
             loadRelationships()
             return nil
         } catch {
-            refreshRelaysOnConnectivityError(error)
+            logger.error("Failed to record follow after MDK invite: \(error.localizedDescription, privacy: .public)")
             let message = error.localizedDescription
             errorMessage = message
             return message
@@ -907,18 +1248,65 @@ final class ParentZoneViewModel: ObservableObject {
             errorMessage = message
             return message
         }
-
+        guard let identity = profileItem.identity else {
+            let message = "Generate a key for \(profileItem.displayName) before approving."
+            errorMessage = message
+            return message
+        }
+        let parentIdentity: ParentIdentity
         do {
-            let updated = try await environment.followCoordinator.approveFollow(
-                follow: follow,
-                approvingProfile: profileItem.profile
+            parentIdentity = try ensureParentIdentityLoaded()
+        } catch {
+            let message = error.localizedDescription
+            errorMessage = message
+            return message
+        }
+        guard let remoteParentValue = remoteParentKey(for: follow),
+              let remoteParentKey = ParentIdentityKey(string: remoteParentValue) else {
+            let message = "Could not determine the other parent's key for this request."
+            errorMessage = message
+            return message
+        }
+        let normalizedRemoteParent = remoteParentKey.hex.lowercased()
+        guard let keyPackages = pendingParentKeyPackages[normalizedRemoteParent], !keyPackages.isEmpty else {
+            let message = GroupMembershipWorkflowError.keyPackageMissing.errorDescription
+                ?? "Scan the other parent's Marmot invite before approving."
+            errorMessage = message
+            return message
+        }
+
+        let groupId: String
+        do {
+            groupId = try await inviteParentToGroup(
+                child: profileItem,
+                identity: identity,
+                keyPackages: keyPackages,
+                normalizedParentKey: normalizedRemoteParent
             )
-            upsertFollow(updated)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            errorMessage = message
+            return message
+        }
+
+        let status: FollowModel.Status = follow.approvedFrom ? .active : .pending
+        do {
+            try recordFollowUpdate(
+                followerChild: follow.followerChild,
+                targetChild: follow.targetChild,
+                approvedFrom: follow.approvedFrom,
+                approvedTo: true,
+                status: status,
+                actorKey: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex,
+                participantKeys: [remoteParentKey.displayValue],
+                mlsGroupId: groupId
+            )
             errorMessage = nil
+            loadIdentities()
             loadRelationships()
             return nil
         } catch {
-            refreshRelaysOnConnectivityError(error)
+            logger.error("Failed to record follow approval: \(error.localizedDescription, privacy: .public)")
             let message = error.localizedDescription
             errorMessage = message
             return message
@@ -935,17 +1323,21 @@ final class ParentZoneViewModel: ObservableObject {
         }
 
         do {
-            let updated = try await environment.followCoordinator.revokeFollow(
+            guard let remoteParent = ParentIdentityKey(string: trimmed) else {
+                let message = "Enter the parent's key to revoke."
+                errorMessage = message
+                return message
+            }
+            try await removeParentFromGroup(
                 follow: follow,
-                remoteParentKey: trimmed
+                remoteParent: remoteParent,
+                newStatus: .revoked
             )
-            upsertFollow(updated)
             errorMessage = nil
-            loadRelationships()
             return nil
         } catch {
             refreshRelaysOnConnectivityError(error)
-            let message = error.localizedDescription
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             errorMessage = message
             return message
         }
@@ -969,6 +1361,13 @@ final class ParentZoneViewModel: ObservableObject {
             loadIdentities()
             childSecretVisibility.insert(identity.profile.id)
             lastCreatedChildID = identity.profile.id
+            Task {
+                do {
+                    try await ensureChildGroup(for: identity, preferredName: trimmed)
+                } catch {
+                    self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+            }
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -989,20 +1388,24 @@ final class ParentZoneViewModel: ObservableObject {
             loadIdentities()
             childSecretVisibility.insert(profileId)
             errorMessage = nil
+            Task {
+                do {
+                    try await ensureChildGroup(for: identity, preferredName: item.profile.name)
+                } catch {
+                    self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     private func refreshRelaysOnConnectivityError(_ error: Error) {
-        if let dmError = error as? DirectMessageOutboxError {
-            switch dmError {
-            case .relaysUnavailable, .sendTimedOut:
+        if let transportError = error as? MarmotTransport.TransportError {
+            if case .relaysUnavailable = transportError {
                 Task {
                     await environment.syncCoordinator.refreshRelays()
                 }
-            default:
-                break
             }
         }
     }
@@ -1037,6 +1440,13 @@ final class ParentZoneViewModel: ObservableObject {
             childSecretVisibility.insert(identity.profile.id)
             lastCreatedChildID = identity.profile.id
             errorMessage = nil
+            Task {
+                do {
+                    try await ensureChildGroup(for: identity, preferredName: trimmedName)
+                } catch {
+                    self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+            }
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1093,6 +1503,7 @@ final class ParentZoneViewModel: ObservableObject {
             Task {
                 await environment.syncCoordinator.refreshSubscriptions()
             }
+            refreshParentKeyPackageIfNeeded()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1119,6 +1530,9 @@ final class ParentZoneViewModel: ObservableObject {
                 self.followRelationships = []
                 self.childKeyLookup.removeAll()
                 self.localParentKeyVariants.removeAll()
+                self.pendingWelcomes = []
+                self.isRefreshingPendingWelcomes = false
+                self.welcomeActionsInFlight.removeAll()
             }
             environment.relationshipStore.refreshAll()
         }
@@ -1136,6 +1550,286 @@ final class ParentZoneViewModel: ObservableObject {
                 self.relayStatuses = statuses
             }
         }
+    }
+
+    func refreshMarmotDiagnostics() {
+        Task { @MainActor in
+            guard !isRefreshingMarmotDiagnostics else { return }
+            isRefreshingMarmotDiagnostics = true
+            defer { isRefreshingMarmotDiagnostics = false }
+            let stats = await environment.mdkActor.stats()
+            marmotDiagnostics = MarmotDiagnostics(
+                groupCount: stats.groupCount,
+                pendingWelcomes: stats.pendingWelcomeCount
+            )
+        }
+    }
+
+    func refreshPendingWelcomes() async {
+        guard !isRefreshingPendingWelcomes else { return }
+        isRefreshingPendingWelcomes = true
+        defer { isRefreshingPendingWelcomes = false }
+        do {
+            let welcomes = try await welcomeClient.getPendingWelcomes()
+            pendingWelcomes = welcomes.map(PendingWelcomeItem.init)
+        } catch {
+            logger.error("Failed to load pending welcomes: \(error.localizedDescription, privacy: .public)")
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func acceptWelcome(_ welcome: PendingWelcomeItem) async {
+        guard !welcomeActionsInFlight.contains(welcome.id) else { return }
+        welcomeActionsInFlight.insert(welcome.id)
+        defer { welcomeActionsInFlight.remove(welcome.id) }
+        do {
+            try await welcomeClient.acceptWelcome(welcomeJson: welcome.welcome.eventJson)
+            pendingWelcomes.removeAll { $0.id == welcome.id }
+            refreshMarmotDiagnostics()
+            notifyPendingWelcomeChange()
+            notifyMarmotStateChange()
+            await handleAcceptedWelcome(welcome.welcome)
+        } catch {
+            logger.error("Failed to accept welcome: \(error.localizedDescription, privacy: .public)")
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func declineWelcome(_ welcome: PendingWelcomeItem) async {
+        guard !welcomeActionsInFlight.contains(welcome.id) else { return }
+        welcomeActionsInFlight.insert(welcome.id)
+        defer { welcomeActionsInFlight.remove(welcome.id) }
+        do {
+            try await welcomeClient.declineWelcome(welcomeJson: welcome.welcome.eventJson)
+            pendingWelcomes.removeAll { $0.id == welcome.id }
+            refreshMarmotDiagnostics()
+            notifyPendingWelcomeChange()
+            notifyMarmotStateChange()
+        } catch {
+            logger.error("Failed to decline welcome: \(error.localizedDescription, privacy: .public)")
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func isProcessingWelcome(_ welcome: PendingWelcomeItem) -> Bool {
+        welcomeActionsInFlight.contains(welcome.id)
+    }
+
+    private func handleAcceptedWelcome(_ welcome: Welcome) async {
+        approvePendingFollows(for: welcome)
+        await environment.syncCoordinator.refreshSubscriptions()
+    }
+
+    private func observeMarmotNotifications() {
+        let center = NotificationCenter.default
+        let pendingObserver = center.addObserver(
+            forName: .marmotPendingWelcomesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handlePendingWelcomeNotification()
+        }
+        let stateObserver = center.addObserver(
+            forName: .marmotStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleMarmotStateNotification()
+        }
+        let messageObserver = center.addObserver(
+            forName: .marmotMessagesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleMarmotMessagesNotification(notification)
+        }
+        marmotObservers.append(contentsOf: [pendingObserver, stateObserver, messageObserver])
+    }
+
+    private func handlePendingWelcomeNotification() {
+        Task { [weak self] in
+            await self?.refreshPendingWelcomes()
+        }
+        refreshMarmotDiagnostics()
+    }
+
+    private func handleMarmotStateNotification() {
+        refreshMarmotDiagnostics()
+        Task { [weak self] in
+            await self?.refreshMembershipSurfaces()
+        }
+        refreshGroupSummaries()
+        refreshRemoteShareStats()
+    }
+
+    private func handleMarmotMessagesNotification(_ notification: Notification) {
+        refreshRemoteShareStats()
+        if let groupId = notification.userInfo?["mlsGroupId"] as? String {
+            refreshGroupSummaries(mlsGroupId: groupId)
+        } else {
+            refreshGroupSummaries()
+        }
+    }
+
+    @MainActor
+    private func refreshMembershipSurfaces() {
+        loadIdentities()
+        loadRelationships()
+    }
+
+    private func refreshGroupSummaries(mlsGroupId: String? = nil) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                if let groupId = mlsGroupId {
+                    guard let group = try await self.environment.mdkActor.getGroup(mlsGroupId: groupId) else {
+                        await MainActor.run {
+                            self.groupSummaries.removeValue(forKey: groupId)
+                        }
+                        return
+                    }
+                    if let summary = await self.buildGroupSummary(group) {
+                        await MainActor.run {
+                            self.groupSummaries[groupId] = summary
+                        }
+                    }
+                } else {
+                    let groups = try await self.environment.mdkActor.getGroups()
+                    var summaries: [String: GroupSummary] = [:]
+                    for group in groups {
+                        if let summary = await self.buildGroupSummary(group) {
+                            summaries[group.mlsGroupId] = summary
+                        }
+                    }
+                    await MainActor.run {
+                        self.groupSummaries = summaries
+                    }
+                }
+            } catch {
+                self.logger.error("Failed to refresh Marmot groups: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func buildGroupSummary(_ group: Group) async -> GroupSummary? {
+        do {
+            async let relaysTask = environment.mdkActor.getRelays(inGroup: group.mlsGroupId)
+            async let membersTask = environment.mdkActor.getMembers(inGroup: group.mlsGroupId)
+            let relays = try await relaysTask
+            let members = try await membersTask
+            let lastMessage: Date?
+            if let timestamp = group.lastMessageAt {
+                lastMessage = Date(timeIntervalSince1970: TimeInterval(timestamp))
+            } else {
+                lastMessage = nil
+            }
+            return GroupSummary(
+                id: group.mlsGroupId,
+                name: group.name,
+                description: group.description,
+                state: group.state,
+                memberCount: members.count,
+                adminCount: group.adminPubkeys.count,
+                relayCount: relays.count,
+                lastMessageAt: lastMessage
+            )
+        } catch {
+            logger.error("Failed to build Marmot group summary: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    private func refreshRemoteShareStats() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let summaries = try self.environment.remoteVideoStore.shareSummaries()
+                var mapping: [String: RemoteShareStats] = [:]
+                for summary in summaries {
+                    let canonical = self.canonicalChildKey(summary.ownerChild) ?? summary.ownerChild.lowercased()
+                    mapping[canonical] = RemoteShareStats(
+                        availableCount: summary.availableCount,
+                        revokedCount: summary.revokedCount,
+                        deletedCount: summary.deletedCount,
+                        blockedCount: summary.blockedCount,
+                        lastSharedAt: summary.lastSharedAt
+                    )
+                }
+                await MainActor.run {
+                    self.shareStatsByChild = mapping
+                }
+            } catch {
+                self.logger.error("Failed to refresh remote share stats: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func approvePendingFollows(for welcome: Welcome) {
+        guard let welcomerKey = ParentIdentityKey(string: welcome.welcomer)?.hex.lowercased() else {
+            logger.warning("Unable to normalize welcomer key for welcome \(welcome.id, privacy: .public)")
+            return
+        }
+
+        let pending = followRelationships.filter { follow in
+            !follow.approvedTo &&
+                follow.participantParentKeys.contains {
+                    $0.caseInsensitiveCompare(welcomerKey) == .orderedSame
+                }
+        }
+
+        guard !pending.isEmpty else {
+            logger.info("No pending follows matched Marmot welcome \(welcome.id, privacy: .public)")
+            return
+        }
+
+        let now = Date()
+        var updatedAny = false
+
+        for follow in pending {
+            guard
+                let followerHex = follow.followerChildHex(),
+                childKeyLookup[followerHex.lowercased()] != nil,
+                let targetHex = follow.targetChildHex()
+            else {
+                continue
+            }
+
+            let status: FollowModel.Status = follow.approvedFrom ? .active : .pending
+            let message = FollowMessage(
+                followerChild: followerHex,
+                targetChild: targetHex,
+                approvedFrom: follow.approvedFrom,
+                approvedTo: true,
+                status: status.rawValue,
+                by: welcomerKey,
+                timestamp: now
+            )
+
+            do {
+                let updated = try environment.relationshipStore.upsertFollow(
+                    message: message,
+                    updatedAt: now,
+                    participantKeys: [welcomerKey],
+                    mlsGroupId: welcome.mlsGroupId
+                )
+                upsertFollow(updated)
+                updatedAny = true
+            } catch {
+                logger.error("Failed to update follow for welcome \(welcome.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        if updatedAny {
+            loadRelationships()
+        }
+    }
+
+    private func notifyPendingWelcomeChange() {
+        NotificationCenter.default.post(name: .marmotPendingWelcomesDidChange, object: nil)
+    }
+
+    private func notifyMarmotStateChange() {
+        NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
     }
 
     func status(for endpoint: RelayDirectory.Endpoint) -> RelayHealth? {
@@ -1173,8 +1867,72 @@ final class ParentZoneViewModel: ObservableObject {
         return nil
     }
 
+    private func remoteChildKey(for follow: FollowModel) -> String? {
+        if childItem(forKey: follow.followerChild) != nil {
+            return canonicalChildKey(follow.targetChild) ?? follow.targetChild.lowercased()
+        }
+        if childItem(forKey: follow.targetChild) != nil {
+            return canonicalChildKey(follow.followerChild) ?? follow.followerChild.lowercased()
+        }
+        return canonicalChildKey(follow.targetChild) ??
+            canonicalChildKey(follow.followerChild) ??
+            follow.targetChild.lowercased()
+    }
+
     func isValidParentKey(_ key: String) -> Bool {
         ParentIdentityKey(string: key) != nil
+    }
+
+    private func ensureChildGroup(for identity: ChildIdentity, preferredName: String) async throws {
+        guard identity.profile.mlsGroupId == nil else { return }
+
+        let parentIdentity = try ensureParentIdentityLoaded()
+        let relays = await environment.relayDirectory.currentRelayURLs()
+        guard !relays.isEmpty else {
+            throw GroupMembershipWorkflowError.relaysUnavailable
+        }
+        let relayStrings = relays.map(\.absoluteString)
+
+        let keyPackage = try await createParentKeyPackage(
+            relays: relays,
+            relayStrings: relayStrings,
+            parentIdentity: parentIdentity
+        )
+        latestParentKeyPackage = keyPackage
+
+        let request = GroupMembershipCoordinator.CreateGroupRequest(
+            creatorPublicKeyHex: parentIdentity.publicKeyHex,
+            memberKeyPackageEventsJson: [keyPackage],
+            name: "\(preferredName) Family",
+            description: "Secure sharing for \(preferredName)",
+            relays: relayStrings,
+            adminPublicKeys: [parentIdentity.publicKeyHex],
+            relayOverride: relays
+        )
+        let response = try await environment.groupMembershipCoordinator.createGroup(request: request)
+        try environment.profileStore.updateGroupId(response.result.group.mlsGroupId, forProfileId: identity.profile.id)
+        loadIdentities()
+        refreshGroupSummaries(mlsGroupId: response.result.group.mlsGroupId)
+    }
+
+    private func createParentKeyPackage(
+        relays: [URL],
+        relayStrings: [String],
+        parentIdentity: ParentIdentity
+    ) async throws -> String {
+        let result = try await environment.mdkActor.createKeyPackage(
+            forPublicKey: parentIdentity.publicKeyHex,
+            relays: relayStrings
+        )
+        let eventJson = try encodeKeyPackageEvent(
+            result: result,
+            parentIdentity: parentIdentity
+        )
+        try await environment.marmotTransport.publish(
+            jsonEvent: eventJson,
+            relayOverride: relays
+        )
+        return eventJson
     }
 
     @discardableResult
@@ -1188,6 +1946,22 @@ final class ParentZoneViewModel: ObservableObject {
         parentIdentity = identity
         updateParentKeyCache(identity)
         return identity
+    }
+
+    private func encodeKeyPackageEvent(
+        result: KeyPackageResult,
+        parentIdentity: ParentIdentity
+    ) throws -> String {
+        let tags = try result.tags.map { raw -> Tag in
+            try Tag.parse(data: raw)
+        }
+        let event = try eventSigner.makeEvent(
+            kind: MarmotEventKind.keyPackage.nostrKind,
+            tags: tags,
+            content: result.keyPackage,
+            keyPair: parentIdentity.keyPair
+        )
+        return try event.asJson()
     }
 
     private func normalizedKeyVariants(_ key: String) -> [String] {
@@ -1210,6 +1984,10 @@ final class ParentZoneViewModel: ObservableObject {
             }
         }
         return Array(variants)
+    }
+
+    private func canonicalChildKey(_ value: String) -> String? {
+        ParentIdentityKey(string: value)?.hex.lowercased()
     }
 
     private func upsertFollow(_ model: FollowModel) {
@@ -1404,6 +2182,7 @@ final class ParentZoneViewModel: ObservableObject {
         let childName: String?
         let childPublicKey: String
         let parentPublicKey: String
+        let parentKeyPackages: [String]?
 
         var encodedURL: String? {
             guard let data = try? JSONEncoder().encode(self) else {
@@ -1472,7 +2251,8 @@ final class ParentZoneViewModel: ObservableObject {
                     version: 1,
                     childName: nil,
                     childPublicKey: childValue,
-                    parentPublicKey: parentValue
+                    parentPublicKey: parentValue,
+                    parentKeyPackages: nil
                 )
             }
 

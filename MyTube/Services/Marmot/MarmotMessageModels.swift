@@ -1,23 +1,22 @@
 //
-//  DirectMessageModels.swift
+//  MarmotMessageModels.swift
 //  MyTube
 //
-//  Created by Codex on 10/26/25.
+//  Created by Assistant on 03/02/26.
 //
 
 import Foundation
+import MDKBindings
 
-enum DirectMessageKind: String, Codable, CaseIterable, Sendable {
+typealias GroupUpdateResult = AddMembersResult
+
+enum MarmotPayloadType: String, Codable, CaseIterable, Sendable {
     case follow = "mytube/follow"
     case videoShare = "mytube/video_share"
     case videoRevoke = "mytube/video_revoke"
     case videoDelete = "mytube/video_delete"
     case like = "mytube/like"
     case report = "mytube/report"
-}
-
-struct DirectMessageEnvelope: Codable, Sendable {
-    let t: String
 }
 
 struct FollowMessage: Codable, Sendable {
@@ -39,7 +38,7 @@ struct FollowMessage: Codable, Sendable {
         by: String,
         timestamp: Date
     ) {
-        self.t = DirectMessageKind.follow.rawValue
+        self.t = MarmotPayloadType.follow.rawValue
         self.followerChild = followerChild
         self.targetChild = targetChild
         self.approvedFrom = approvedFrom
@@ -202,7 +201,7 @@ struct VideoShareMessage: Codable, Sendable {
         by: String,
         timestamp: Date
     ) {
-        self.t = DirectMessageKind.videoShare.rawValue
+        self.t = MarmotPayloadType.videoShare.rawValue
         self.videoId = videoId
         self.ownerChild = ownerChild
         self.meta = meta
@@ -235,7 +234,8 @@ struct VideoLifecycleMessage: Codable, Sendable {
     let by: String
     let ts: Double
 
-    init(kind: DirectMessageKind, videoId: String, reason: String?, by: String, timestamp: Date) {
+    init(kind: MarmotPayloadType, videoId: String, reason: String?, by: String, timestamp: Date) {
+        precondition(kind == .videoRevoke || kind == .videoDelete, "Lifecycle message must be revoke/delete")
         self.t = kind.rawValue
         self.videoId = videoId
         self.reason = reason
@@ -260,7 +260,7 @@ struct LikeMessage: Codable, Sendable {
     let ts: Double
 
     init(videoId: String, viewerChild: String, by: String, timestamp: Date) {
-        self.t = DirectMessageKind.like.rawValue
+        self.t = MarmotPayloadType.like.rawValue
         self.videoId = videoId
         self.viewerChild = viewerChild
         self.by = by
@@ -285,8 +285,15 @@ struct ReportMessage: Codable, Sendable {
     let by: String
     let ts: Double
 
-    init(videoId: String, subjectChild: String, reason: String, note: String?, by: String, timestamp: Date) {
-        self.t = DirectMessageKind.report.rawValue
+    init(
+        videoId: String,
+        subjectChild: String,
+        reason: String,
+        note: String?,
+        by: String,
+        timestamp: Date
+    ) {
+        self.t = MarmotPayloadType.report.rawValue
         self.videoId = videoId
         self.subjectChild = subjectChild
         self.reason = reason

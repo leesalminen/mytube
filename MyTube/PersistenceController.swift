@@ -145,6 +145,7 @@ struct SampleDataSeeder {
         profile.name = "Sample Kid"
         profile.theme = ThemeDescriptor.ocean.rawValue
         profile.avatarAsset = "avatar.dolphin"
+        profile.mlsGroupId = nil
 
         let video = VideoEntity(context: context)
         video.id = UUID()

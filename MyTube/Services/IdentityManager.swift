@@ -92,7 +92,6 @@ struct ChildDelegation: Sendable {
 
 enum ChildDelegationDefaults {
     static let allowedKinds: [Int] = [
-        MyTubeEventKind.directMessage.rawValue,
         MyTubeEventKind.childFollowPointer.rawValue
     ]
 }

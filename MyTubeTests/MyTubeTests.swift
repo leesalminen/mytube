@@ -81,6 +81,7 @@ struct MyTubeTests {
         profile.name = "Test Child"
         profile.theme = ThemeDescriptor.ocean.rawValue
         profile.avatarAsset = "avatar.dolphin"
+        profile.mlsGroupId = nil
         try persistence.viewContext.save()
 
         let tempVideo = tempBase.appendingPathComponent("source.mp4")

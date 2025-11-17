@@ -5,6 +5,8 @@
 //  Created by Codex on 10/24/25.
 //
 
+import Combine
+import Foundation
 import SwiftUI
 import UIKit
 
@@ -42,6 +44,11 @@ struct ParentZoneView: View {
     @State private var selectedSection: ParentZoneSection = .overview
     @State private var expandedChildIDs: Set<UUID> = []
     @State private var familyViewSelection: FamilyViewSelection = .parent
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
 
     init(environment: AppEnvironment) {
         self.environment = environment
@@ -197,7 +204,7 @@ struct ParentZoneView: View {
         .sheet(isPresented: $isRequestingFollow) {
             NavigationStack {
                 Form {
-                    Section("Follower") {
+                    Section("Local Child") {
                         Picker("Local child", selection: $followChildSelection) {
                             ForEach(viewModel.childIdentities) { child in
                                 Text(child.displayName)
@@ -208,7 +215,7 @@ struct ParentZoneView: View {
                         .disabled(followIsSubmitting)
                     }
 
-                    Section("Friend Keys") {
+                    Section("Friend Family Keys") {
                         HStack {
                             TextField("Friend's child npub or hex", text: $followTargetChildKey)
                                 .textInputAutocapitalization(.never)
@@ -243,7 +250,7 @@ struct ParentZoneView: View {
                             .disabled(followIsSubmitting)
                             .accessibilityLabel("Scan friend parent key QR")
                         }
-                        Text("Both parents must approve before follows become active.")
+                        Text("Both parents must accept the Marmot invite before the group opens.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
@@ -268,17 +275,17 @@ struct ParentZoneView: View {
                             }
                             .pickerStyle(.menu)
                             .disabled(followIsSubmitting)
-                            Text("Select an approved parent to autofill the other parent's key.")
+                            Text("Approved parents appear here after a Marmot invite is accepted, so you can autofill the other family's key.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                   }
-                } else {
-                    Section {
-                            Text("No approved parents yet. Approve a follow request so you know who you're sharing with.")
+                        }
+                    } else {
+                        Section {
+                            Text("No approved families yet. Approve a Marmot invite so you know who you're sharing with.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        }
                     }
-                }
 
                     if followIsSubmitting {
                         Section {
@@ -296,7 +303,7 @@ struct ParentZoneView: View {
                         }
                     }
                 }
-                .navigationTitle("Follow Request")
+                .navigationTitle("Marmot Invite")
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") {
@@ -306,7 +313,7 @@ struct ParentZoneView: View {
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Send") {
                             guard let childId = followChildSelection else {
-                                followFormError = "Select which child is following."
+                                followFormError = "Select which child is sending the invite."
                                 return
                             }
                             followFormError = nil
@@ -367,7 +374,7 @@ struct ParentZoneView: View {
                             .disabled(shareIsSending)
                             .accessibilityLabel("Scan recipient parent key QR")
                         }
-                        Text("The other parent must approve the follow connection before their kids can watch shared videos.")
+                        Text("The other parent must accept your Marmot invite before their kids can watch new shares.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
@@ -392,13 +399,13 @@ struct ParentZoneView: View {
                             }
                             .pickerStyle(.menu)
                             .disabled(shareIsSending)
-                            Text("Approved parents appear here to autofill the other parent's key.")
+                            Text("Approved parents appear here after a Marmot invite is accepted, so you can autofill the other family's key.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     } else {
                         Section {
-                            Text("No approved followers yet. Approve a follow request so you know who you're sharing with.")
+                            Text("No approved families yet. Approve a Marmot invite so you know who you're sharing with.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -597,6 +604,9 @@ private extension ParentZoneView {
         let videoCount = viewModel.videos.count
         let incomingCount = viewModel.incomingFollowRequests().count
         let activeCount = viewModel.activeFollowConnections().count
+        let remoteShareCount = viewModel.totalAvailableRemoteShares()
+        let groupCount = viewModel.marmotDiagnostics.groupCount
+        let pendingWelcomes = viewModel.pendingWelcomes.count
 
         return insetGroupedList {
             Section("Family Summary") {
@@ -617,8 +627,26 @@ private extension ParentZoneView {
                 Label("\(videoCount) saved \(videoCount == 1 ? "video" : "videos")", systemImage: "film.stack")
                     .foregroundStyle(Color.primary)
 
-                Label("\(activeCount) active follow \(activeCount == 1 ? "connection" : "connections")", systemImage: "person.crop.circle.badge.checkmark")
+                Label("\(activeCount) active family \(activeCount == 1 ? "connection" : "connections")", systemImage: "person.crop.circle.badge.checkmark")
                     .foregroundStyle(activeCount > 0 ? Color.accentColor : Color.secondary)
+
+                if groupCount > 0 {
+                    Label("\(groupCount) Marmot \(groupCount == 1 ? "group" : "groups") ready", systemImage: "person.3.sequence")
+                        .foregroundStyle(Color.primary)
+                } else {
+                    Label("No Marmot groups yet", systemImage: "person.3.sequence.fill")
+                        .foregroundStyle(Color.secondary)
+                }
+
+                if remoteShareCount > 0 {
+                    Label("\(remoteShareCount) shared \(remoteShareCount == 1 ? "video" : "videos") from friends", systemImage: "tray.and.arrow.down.fill")
+                        .foregroundStyle(Color.purple)
+                }
+
+                if pendingWelcomes > 0 {
+                    Label("\(pendingWelcomes) pending Marmot invite\(pendingWelcomes == 1 ? "" : "s")", systemImage: "envelope.open")
+                        .foregroundStyle(Color.orange)
+                }
 
                 if incomingCount > 0 {
                     Label("\(incomingCount) pending approval\(incomingCount == 1 ? "" : "s")", systemImage: "bell.badge.fill")
@@ -642,14 +670,14 @@ private extension ParentZoneView {
                 Button {
                     prepareFollowRequest()
                 } label: {
-                    Label("New Follow Request", systemImage: "person.crop.circle.badge.plus")
+                    Label("New Marmot Invite", systemImage: "person.crop.circle.badge.plus")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .disabled(viewModel.childIdentities.isEmpty)
 
                 if viewModel.childIdentities.isEmpty {
-                    Text("Add a child profile before sending follow requests.")
+                    Text("Add a child profile before sending Marmot invites.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -712,7 +740,7 @@ private extension ParentZoneView {
                         }
                         .buttonStyle(KidPrimaryButtonStyle())
 
-                        Text("Your parent key manages child profiles, storage, and follow approvals.")
+                        Text("Your parent key manages child profiles, storage, and Marmot invites.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -742,18 +770,18 @@ private extension ParentZoneView {
         let active = viewModel.activeFollowConnections()
 
         return insetGroupedList {
-            Section("Requests & Approvals") {
+            Section("Marmot Invites & Approvals") {
                 Button {
                     prepareFollowRequest()
                 } label: {
-                    Label("New Follow Request", systemImage: "person.crop.circle.badge.plus")
+                    Label("New Marmot Invite", systemImage: "person.crop.circle.badge.plus")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(KidPrimaryButtonStyle())
                 .disabled(viewModel.childIdentities.isEmpty)
 
                 if viewModel.childIdentities.isEmpty {
-                    Text("Add a child profile before sending follow requests.")
+                    Text("Add a child profile before sending Marmot invites.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 4)
@@ -776,9 +804,58 @@ private extension ParentZoneView {
                     active: active
                 )
             }
+
+            Section("Marmot Group Invites") {
+                if viewModel.pendingWelcomes.isEmpty {
+                    if viewModel.isRefreshingPendingWelcomes {
+                        HStack {
+                            ProgressView()
+                            Text("Loading invites…")
+                        }
+                        .font(.caption)
+                    } else {
+                        Text("No pending Marmot welcomes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ForEach(viewModel.pendingWelcomes) { welcome in
+                        pendingWelcomeRow(welcome)
+                    }
+                }
+
+                Button {
+                    Task {
+                        await viewModel.refreshPendingWelcomes()
+                    }
+                } label: {
+                    if viewModel.isRefreshingPendingWelcomes {
+                        HStack {
+                            ProgressView()
+                            Text("Refreshing…")
+                        }
+                    } else {
+                        Label("Refresh Welcomes", systemImage: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.isRefreshingPendingWelcomes)
+            }
         }
         .onAppear {
             viewModel.refreshConnections()
+            Task {
+                await viewModel.refreshPendingWelcomes()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .marmotStateDidChange)) { _ in
+            guard viewModel.isUnlocked else { return }
+            viewModel.refreshConnections()
+            viewModel.refreshMarmotDiagnostics()
+            Task {
+                await viewModel.refreshPendingWelcomes()
+            }
         }
     }
 
@@ -968,7 +1045,7 @@ private extension ParentZoneView {
             Section("Outbound Reports") {
                 let outbound = viewModel.outboundReports()
                 if outbound.isEmpty {
-                    Text("You haven't reported any shared videos yet.")
+                    Text("You haven't reported any shared videos yet. Incoming shares travel over Marmot groups.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
@@ -1022,6 +1099,38 @@ private extension ParentZoneView {
                     .font(.footnote)
                 }
                 .padding(.vertical, 4)
+            }
+
+            Section("Marmot Diagnostics") {
+                LabeledContent {
+                    Text("\(viewModel.marmotDiagnostics.groupCount)")
+                        .font(.headline)
+                } label: {
+                    Label("Groups", systemImage: "person.3.sequence")
+                        .font(.subheadline)
+                }
+
+                LabeledContent {
+                    Text("\(viewModel.marmotDiagnostics.pendingWelcomes)")
+                        .font(.headline)
+                } label: {
+                    Label("Pending welcomes", systemImage: "envelope.open")
+                        .font(.subheadline)
+                }
+
+                Button {
+                    viewModel.refreshMarmotDiagnostics()
+                } label: {
+                    if viewModel.isRefreshingMarmotDiagnostics {
+                        HStack {
+                            ProgressView()
+                            Text("Refreshing…")
+                        }
+                    } else {
+                        Label("Refresh Diagnostics", systemImage: "arrow.clockwise")
+                    }
+                }
+                .disabled(viewModel.isRefreshingMarmotDiagnostics)
             }
 
             Section("Maintenance") {
@@ -1239,7 +1348,7 @@ private extension ParentZoneView {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Parent Profile")
                     .font(.headline)
-                Text("Share a friendly name with your wrap key so followers can decrypt shared videos.")
+                Text("Share a friendly name with your wrap key so trusted families can decrypt shared videos.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -1312,13 +1421,21 @@ private extension ParentZoneView {
             Text(child.displayName)
                 .font(.headline)
 
+            if let summary = viewModel.groupSummary(for: child) {
+                groupSummaryCard(summary: summary)
+            } else {
+                Text("Generate \(child.displayName)'s secure Marmot group to share invites.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             if let followInvite = viewModel.followInvite(for: child),
                let followURL = followInvite.encodedURL {
                 let summary = "Parent: \(shortKey(followInvite.parentPublicKey))\nChild: \(shortKey(followInvite.childPublicKey))"
-                QRCodeCard(
-                    title: "\(child.displayName) Follow Invite",
-                    content: .text(label: "Autofill Keys", value: summary),
-                    footer: "Share once so the other parent gets both keys in a single scan.",
+                    QRCodeCard(
+                        title: "\(child.displayName) Marmot Invite",
+                        content: .text(label: "Autofill Keys", value: summary),
+                        footer: "Share once so the other parent gets both keys in a single scan for their Marmot invite.",
                     copyAction: { copyToPasteboard(followURL) },
                     toggleSecure: nil,
                     qrValue: followURL,
@@ -1334,7 +1451,7 @@ private extension ParentZoneView {
                     QRCodeCard(
                         title: "\(child.displayName) Public Key",
                         content: .text(label: "\(child.displayName) npub", value: npub),
-                        footer: "Share this with approved families so they can follow \(child.displayName).",
+                        footer: "Share this with approved families so they can join \(child.displayName)'s Marmot group.",
                         copyAction: { copyToPasteboard(npub) },
                         toggleSecure: nil,
                         qrValue: npub,
@@ -1477,13 +1594,13 @@ private extension ParentZoneView {
         active: [FollowModel]
     ) -> some View {
         if incoming.isEmpty && outgoing.isEmpty && active.isEmpty {
-            Text("No follow relationships yet. Share your child's key with a friend and send a request.")
+                Text("No Marmot connections yet. Share your child's invite with a family you trust to start a group.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.vertical, 4)
         } else {
             if !incoming.isEmpty {
-                Text("Pending approvals")
+                Text("Awaiting your approval")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
@@ -1493,7 +1610,7 @@ private extension ParentZoneView {
             }
 
             if !outgoing.isEmpty {
-                Text("Requests you sent")
+                Text("Invites you sent")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
@@ -1503,7 +1620,7 @@ private extension ParentZoneView {
             }
 
             if !active.isEmpty {
-                Text("Active follows")
+                Text("Active Marmot Families")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
@@ -1524,20 +1641,27 @@ private extension ParentZoneView {
             ].compactMap { $0 }
         )
 
+        let parentKey = viewModel.remoteParentKey(for: follow)
+        let needsKeyPackages: Bool = {
+            guard role == .incoming else { return false }
+            guard let key = parentKey else { return true }
+            return !viewModel.hasPendingKeyPackages(for: key)
+        }()
+
         return VStack(alignment: .leading, spacing: 6) {
             switch role {
             case .incoming:
                 let localName = targetItem?.displayName ?? "This child"
                 Text("\(localName) ← \(shortKey(follow.followerChild))")
                     .font(.subheadline)
-                Text("Waiting for your approval")
+                Text("Waiting for you to accept the Marmot invite")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             case .outgoing:
                 let localName = followerItem?.displayName ?? "This child"
                 Text("\(localName) → \(shortKey(follow.targetChild))")
                     .font(.subheadline)
-                Text("Waiting for the other parent to approve")
+                Text("Waiting for the other parent to accept")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             case .active:
@@ -1545,12 +1669,21 @@ private extension ParentZoneView {
                 let targetName = targetItem?.displayName ?? shortKey(follow.targetChild)
                 Text("\(followerName) ↔︎ \(targetName)")
                     .font(.subheadline)
-                Text("Followers can watch each other's shared videos.")
+                Text("Families in this Marmot group can watch each other's shared videos.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            if let parentKey = viewModel.remoteParentKey(for: follow),
+            if let summary = viewModel.groupSummary(for: follow) {
+                groupSummaryCard(summary: summary)
+            }
+
+            if role == .active,
+               let stats = viewModel.shareStats(for: follow) {
+                remoteShareStatsCard(stats: stats)
+            }
+
+            if let parentKey,
                !localParentKeys.contains(parentKey.lowercased()) {
                 Text("Parent: \(shortKey(parentKey))")
                     .font(.caption2)
@@ -1559,6 +1692,20 @@ private extension ParentZoneView {
             }
 
             if role == .incoming {
+                if needsKeyPackages {
+                    Text("Scan the other parent's Marmot invite to capture their key packages before approving.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        qrIntent = .followParent
+                    } label: {
+                        Label("Scan Invite", systemImage: "qrcode.viewfinder")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
                 if approvingFollowID == follow.id {
                     ProgressView()
                         .controlSize(.small)
@@ -1572,11 +1719,69 @@ private extension ParentZoneView {
                     }
                     .buttonStyle(KidPrimaryButtonStyle())
                     .controlSize(.small)
+                    .disabled(needsKeyPackages)
                 }
             }
         }
         .padding(.vertical, 4)
         .textSelection(.enabled)
+    }
+
+    @ViewBuilder
+    private func groupSummaryCard(summary: ParentZoneViewModel.GroupSummary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(summary.displayName)
+                    .font(.subheadline)
+                Spacer()
+                Text(summary.state.capitalized)
+                    .font(.caption2)
+                    .foregroundStyle(summary.isActive ? Color.green : Color.orange)
+            }
+            Text("\(summary.memberCount) member\(summary.memberCount == 1 ? "" : "s") • \(summary.relayCount) relay\(summary.relayCount == 1 ? "" : "s")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let relative = relativeDateString(for: summary.lastMessageAt) {
+                Text("Last activity \(relative)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+        )
+    }
+
+    @ViewBuilder
+    private func remoteShareStatsCard(stats: ParentZoneViewModel.RemoteShareStats) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if stats.hasAvailableShares {
+                Text("\(stats.availableCount) shared \(stats.availableCount == 1 ? "video" : "videos") ready to play")
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+            } else {
+                Text("No shared videos yet")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let relative = relativeDateString(for: stats.lastSharedAt) {
+                Text("Last shared \(relative)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.tertiarySystemBackground))
+        )
+    }
+
+    private func relativeDateString(for date: Date?) -> String? {
+        guard let date else { return nil }
+        return ParentZoneView.relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 
     func handleScanResult(_ rawValue: String, for intent: QRIntent) {
@@ -1623,6 +1828,65 @@ private extension ParentZoneView {
         }
     }
 
+    @ViewBuilder
+    private func pendingWelcomeRow(_ welcome: ParentZoneViewModel.PendingWelcomeItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(welcome.groupName)
+                        .font(.headline)
+                    Text("Invited by \(shortKey(welcome.welcomerKey)) • \(welcome.memberCount) members")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if viewModel.isProcessingWelcome(welcome) {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let description = welcome.groupDescription {
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let relaySummary = welcome.relaySummary {
+                Text("Relays: \(relaySummary)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if welcome.adminCount > 0 {
+                Text("\(welcome.adminCount) admin\(welcome.adminCount == 1 ? "" : "s")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button("Decline") {
+                    Task {
+                        await viewModel.declineWelcome(welcome)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.isProcessingWelcome(welcome))
+
+                Button("Accept") {
+                    Task {
+                        await viewModel.acceptWelcome(welcome)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(viewModel.isProcessingWelcome(welcome))
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
     func applyChildInvite(_ invite: ParentZoneViewModel.ChildDeviceInvite, for intent: QRIntent) {
         switch intent {
         case .importChild:
@@ -1637,7 +1901,8 @@ private extension ParentZoneView {
                     version: invite.version,
                     childName: invite.childName,
                     childPublicKey: invite.childPublicKey,
-                    parentPublicKey: invite.parentPublicKey
+                    parentPublicKey: invite.parentPublicKey,
+                    parentKeyPackages: nil
                 )
             )
 
@@ -1647,7 +1912,8 @@ private extension ParentZoneView {
                     version: invite.version,
                     childName: invite.childName,
                     childPublicKey: invite.childPublicKey,
-                    parentPublicKey: invite.parentPublicKey
+                    parentPublicKey: invite.parentPublicKey,
+                    parentKeyPackages: nil
                 )
             )
 
@@ -1669,6 +1935,7 @@ private extension ParentZoneView {
         followTargetParentKey = invite.parentPublicKey
         followSelectedParentKey = matchingParentOption(for: invite.parentPublicKey, in: followParentOptions)
         followFormError = nil
+        viewModel.storePendingKeyPackages(from: invite)
     }
 
     func normalizedScannedKey(_ rawValue: String, validator: (String) -> Bool) -> String {

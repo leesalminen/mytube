@@ -7,7 +7,6 @@
 
 import Foundation
 import OSLog
-import NostrSDK
 
 struct VideoShareOptions {
     var visibility: String
@@ -19,6 +18,7 @@ enum VideoSharePublisherError: Error {
     case fileMissing(URL)
     case thumbnailMissing(URL)
     case invalidRecipientKey
+    case parentIdentityMissing
 }
 
 actor VideoSharePublisher {
@@ -32,9 +32,7 @@ actor VideoSharePublisher {
     private let storagePaths: StoragePaths
     private let cryptoService: CryptoEnvelopeService
     private let storageClient: any MediaStorageClient
-    private let directMessageOutbox: any DirectMessageSending
     private let keyStore: KeychainKeyStore
-    private let parentProfileStore: ParentProfileStore
     private let logger = Logger(subsystem: "com.mytube", category: "VideoSharePublisher")
     private var stagedUploads: [UUID: Task<StagedUpload, Error>] = [:]
 
@@ -42,58 +40,31 @@ actor VideoSharePublisher {
         storagePaths: StoragePaths,
         cryptoService: CryptoEnvelopeService,
         storageClient: any MediaStorageClient,
-        directMessageOutbox: any DirectMessageSending,
-        keyStore: KeychainKeyStore,
-        parentProfileStore: ParentProfileStore
+        keyStore: KeychainKeyStore
     ) {
         self.storagePaths = storagePaths
         self.cryptoService = cryptoService
         self.storageClient = storageClient
-        self.directMessageOutbox = directMessageOutbox
         self.keyStore = keyStore
-        self.parentProfileStore = parentProfileStore
     }
 
     @discardableResult
-    func share(
+    func makeShareMessage(
         video: VideoModel,
         ownerChildNpub: String,
-        recipientPublicKey: String,
         options: VideoShareOptions = .default
     ) async throws -> VideoShareMessage {
         let stage = try await stageUpload(video: video, ownerChildNpub: ownerChildNpub)
-        let recipient = try resolveRecipientKey(recipientPublicKey)
-        let recipientWrapKey = await fetchRecipientWrapKey(hex: recipient.hex)
-        let parentKeyPair = try keyStore.ensureParentKeyPair()
+        guard let parentKeyPair = try keyStore.fetchKeyPair(role: .parent) else {
+            throw VideoSharePublisherError.parentIdentityMissing
+        }
         let now = Date()
 
-        let crypto: VideoShareMessage.Crypto
-        if let wrapKey = recipientWrapKey, wrapKey.count == 32 {
-            let wrappedKey = try cryptoService.wrapMediaKey(stage.mediaKey, for: wrapKey)
-            crypto = VideoShareMessage.Crypto(
-                algMedia: cryptoService.mediaAlgorithmIdentifier,
-                nonceMedia: stage.encryptedPayload.nonce.base64EncodedString(),
-                mediaKey: nil,
-                algWrap: cryptoService.wrapAlgorithmIdentifier,
-                wrap: VideoShareMessage.Crypto.Wrap(
-                    ephemeralPub: wrappedKey.ephemeralPublicKey.base64EncodedString(),
-                    wrapSalt: wrappedKey.wrapSalt.base64EncodedString(),
-                    wrapNonce: wrappedKey.wrapNonce.base64EncodedString(),
-                    keyWrapped: wrappedKey.keyCiphertext.base64EncodedString()
-                )
-            )
-        } else {
-            if recipientWrapKey == nil {
-                logger.debug("No wrap key for recipient \(recipient.hex.prefix(8))… falling back to direct media key.")
-            } else {
-                logger.warning("Wrap key for recipient \(recipient.hex.prefix(8))… invalid length; expected 32 bytes.")
-            }
-            crypto = VideoShareMessage.Crypto(
-                algMedia: cryptoService.mediaAlgorithmIdentifier,
-                nonceMedia: stage.encryptedPayload.nonce.base64EncodedString(),
-                mediaKey: stage.mediaKey.base64EncodedString()
-            )
-        }
+        let crypto = VideoShareMessage.Crypto(
+            algMedia: cryptoService.mediaAlgorithmIdentifier,
+            nonceMedia: stage.encryptedPayload.nonce.base64EncodedString(),
+            mediaKey: stage.mediaKey.base64EncodedString()
+        )
 
         let policy = VideoShareMessage.Policy(
             visibility: options.visibility,
@@ -107,7 +78,7 @@ actor VideoSharePublisher {
             createdAt: video.createdAt
         )
 
-        let message = VideoShareMessage(
+        return VideoShareMessage(
             videoId: video.id.uuidString,
             ownerChild: ownerChildNpub,
             meta: meta,
@@ -118,18 +89,6 @@ actor VideoSharePublisher {
             by: parentKeyPair.publicKeyHex,
             timestamp: now
         )
-
-        try await directMessageOutbox.sendMessage(
-            message,
-            kind: .videoShare,
-            recipientPublicKey: recipient.hex,
-            additionalTags: [NostrTagBuilder.make(name: "d", value: video.id.uuidString)],
-            relayOverride: nil,
-            createdAt: now
-        )
-
-        logger.info("Shared video \(video.id.uuidString, privacy: .public) with recipient \(recipient.hex.prefix(8))…")
-        return message
     }
 
     private func mimeType(forExtension ext: String, defaultType: String) -> String {
@@ -147,37 +106,6 @@ actor VideoSharePublisher {
         default:
             return defaultType
         }
-    }
-
-    private func fetchRecipientWrapKey(hex: String) async -> Data? {
-        await MainActor.run {
-            do {
-                return try parentProfileStore.profile(for: hex.lowercased())?.wrapPublicKey
-            } catch {
-                logger.error("Failed to load wrap key for \(hex.prefix(8))… \(error.localizedDescription, privacy: .public)")
-                return nil
-            }
-        }
-    }
-
-    private func resolveRecipientKey(_ input: String) throws -> (hex: String, data: Data) {
-        let cleaned = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { throw VideoSharePublisherError.invalidRecipientKey }
-
-        let lowercase = cleaned.lowercased()
-        if let hexData = Data(hexString: lowercase), hexData.count == 32 {
-            return (hexData.hexEncodedString(), hexData)
-        }
-
-        if lowercase.hasPrefix(NIP19Kind.npub.rawValue) {
-            let decoded = try NIP19.decode(lowercase)
-            guard decoded.kind == .npub else {
-                throw VideoSharePublisherError.invalidRecipientKey
-            }
-            return (decoded.data.hexEncodedString(), decoded.data)
-        }
-
-        throw VideoSharePublisherError.invalidRecipientKey
     }
 
     private func sanitizeComponent(_ value: String) -> String {
@@ -287,6 +215,8 @@ extension VideoSharePublisherError: LocalizedError {
             return "Thumbnail is missing at \(url.lastPathComponent)."
         case .invalidRecipientKey:
             return "Recipient key must be a hex string or npub."
+        case .parentIdentityMissing:
+            return "Parent identity is missing. Complete parent setup before sharing."
         }
     }
 }

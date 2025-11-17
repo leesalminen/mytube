@@ -27,18 +27,22 @@ final class AppEnvironment: ObservableObject {
     let parentProfilePublisher: ParentProfilePublisher
     let childProfilePublisher: ChildProfilePublisher
     let childProfileStore: ChildProfileStore
+    let mdkActor: MdkActor
+    let marmotTransport: MarmotTransport
+    let marmotShareService: MarmotShareService
+    let marmotProjectionStore: MarmotProjectionStore
     let cryptoService: CryptoEnvelopeService
     let nostrClient: NostrClient
     let relayDirectory: RelayDirectory
     let syncCoordinator: SyncCoordinator
-    let directMessageOutbox: DirectMessageOutbox
     let likeStore: LikeStore
     let likePublisher: LikePublisher
     let storageRouter: StorageRouter
     let videoSharePublisher: VideoSharePublisher
     let videoShareCoordinator: VideoShareCoordinator
     let relationshipStore: RelationshipStore
-    let followCoordinator: FollowCoordinator
+    let parentKeyPackageStore: ParentKeyPackageStore
+    let groupMembershipCoordinator: any GroupMembershipCoordinating
     let reportStore: ReportStore
     let reportCoordinator: ReportCoordinator
     let backendClient: BackendClient
@@ -78,18 +82,22 @@ final class AppEnvironment: ObservableObject {
         parentProfilePublisher: ParentProfilePublisher,
         childProfilePublisher: ChildProfilePublisher,
         childProfileStore: ChildProfileStore,
+        mdkActor: MdkActor,
+        marmotTransport: MarmotTransport,
+        marmotShareService: MarmotShareService,
+        marmotProjectionStore: MarmotProjectionStore,
         cryptoService: CryptoEnvelopeService,
         nostrClient: NostrClient,
         relayDirectory: RelayDirectory,
         syncCoordinator: SyncCoordinator,
-        directMessageOutbox: DirectMessageOutbox,
         likeStore: LikeStore,
         likePublisher: LikePublisher,
         storageRouter: StorageRouter,
         videoSharePublisher: VideoSharePublisher,
         videoShareCoordinator: VideoShareCoordinator,
         relationshipStore: RelationshipStore,
-        followCoordinator: FollowCoordinator,
+        parentKeyPackageStore: ParentKeyPackageStore,
+        groupMembershipCoordinator: any GroupMembershipCoordinating,
         reportStore: ReportStore,
         reportCoordinator: ReportCoordinator,
         backendClient: BackendClient,
@@ -120,18 +128,22 @@ final class AppEnvironment: ObservableObject {
         self.parentProfilePublisher = parentProfilePublisher
         self.childProfilePublisher = childProfilePublisher
         self.childProfileStore = childProfileStore
+        self.mdkActor = mdkActor
+        self.marmotTransport = marmotTransport
+        self.marmotShareService = marmotShareService
+        self.marmotProjectionStore = marmotProjectionStore
         self.cryptoService = cryptoService
         self.nostrClient = nostrClient
         self.relayDirectory = relayDirectory
         self.syncCoordinator = syncCoordinator
-        self.directMessageOutbox = directMessageOutbox
         self.likeStore = likeStore
         self.likePublisher = likePublisher
         self.storageRouter = storageRouter
         self.videoSharePublisher = videoSharePublisher
         self.videoShareCoordinator = videoShareCoordinator
         self.relationshipStore = relationshipStore
-        self.followCoordinator = followCoordinator
+        self.parentKeyPackageStore = parentKeyPackageStore
+        self.groupMembershipCoordinator = groupMembershipCoordinator
         self.reportStore = reportStore
         self.reportCoordinator = reportCoordinator
         self.backendClient = backendClient
@@ -168,6 +180,19 @@ enum StorageModeError: Error {
             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("MyTube", isDirectory: true)
             storagePaths = try! StoragePaths(baseURL: tempURL)
         }
+        let parentKeyPackageStore = ParentKeyPackageStore(
+            fileURL: storagePaths.parentKeyPackageCacheURL()
+        )
+        let mdkActor: MdkActor
+        do {
+            mdkActor = try MdkActor(storagePaths: storagePaths)
+        } catch {
+            assertionFailure("MDK initialization failed: \(error)")
+            let fallbackURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("MyTube", isDirectory: true)
+                .appendingPathComponent("mdk-fallback.sqlite", isDirectory: false)
+            mdkActor = try! MdkActor(databaseURL: fallbackURL)
+        }
         let videoLibrary = VideoLibrary(persistence: persistence, storagePaths: storagePaths)
         let remoteVideoStore = RemoteVideoStore(persistence: persistence)
         let remotePlaybackStore = RemotePlaybackStore(persistence: persistence)
@@ -184,12 +209,37 @@ enum StorageModeError: Error {
         let nostrClient = RelayPoolNostrClient()
         let defaults = UserDefaults.standard
         let relayDirectory = RelayDirectory(userDefaults: defaults)
+        let marmotTransport = MarmotTransport(
+            nostrClient: nostrClient,
+            relayDirectory: relayDirectory,
+            mdkActor: mdkActor,
+            keyStore: keyStore,
+            cryptoService: cryptoService
+        )
+        let marmotShareService = MarmotShareService(
+            mdkActor: mdkActor,
+            transport: marmotTransport,
+            keyStore: keyStore
+        )
         let likeStore = LikeStore(
             persistenceController: persistence,
             childProfileStore: childProfileStore
         )
         let relationshipStore = RelationshipStore(persistence: persistence)
         let reportStore = ReportStore(persistence: persistence)
+        let marmotProjectionStore = MarmotProjectionStore(
+            mdkActor: mdkActor,
+            remoteVideoStore: remoteVideoStore,
+            likeStore: likeStore,
+            reportStore: reportStore,
+            storagePaths: storagePaths,
+            notificationCenter: .default,
+            userDefaults: defaults
+        )
+        let groupMembershipCoordinator = GroupMembershipCoordinator(
+            mdkActor: mdkActor,
+            marmotTransport: marmotTransport
+        )
         let parentProfilePublisher = ParentProfilePublisher(
             identityManager: identityManager,
             parentProfileStore: parentProfileStore,
@@ -206,6 +256,7 @@ enum StorageModeError: Error {
             persistence: persistence,
             nostrClient: nostrClient,
             relayDirectory: relayDirectory,
+            marmotTransport: marmotTransport,
             keyStore: keyStore,
             cryptoService: cryptoService,
             relationshipStore: relationshipStore,
@@ -217,17 +268,12 @@ enum StorageModeError: Error {
             videoLibrary: videoLibrary,
             storagePaths: storagePaths
         )
-        let directMessageOutbox = DirectMessageOutbox(
-            keyStore: keyStore,
-            cryptoService: cryptoService,
-            nostrClient: nostrClient,
-            relayDirectory: relayDirectory
-        )
         let likePublisher = LikePublisher(
-            directMessageOutbox: directMessageOutbox,
+            marmotShareService: marmotShareService,
             keyStore: keyStore,
             childProfileStore: childProfileStore,
-            remoteVideoStore: remoteVideoStore
+            remoteVideoStore: remoteVideoStore,
+            relationshipStore: relationshipStore
         )
         let legacyDefault = "http://127.0.0.1:8080"
         let managedDefault = "https://auth.tubestr.app"
@@ -288,34 +334,23 @@ enum StorageModeError: Error {
             storagePaths: storagePaths,
             cryptoService: cryptoService,
             storageClient: storageRouter,
-            directMessageOutbox: directMessageOutbox,
-            keyStore: keyStore,
-            parentProfileStore: parentProfileStore
+            keyStore: keyStore
         )
         let videoShareCoordinator = VideoShareCoordinator(
             persistence: persistence,
             keyStore: keyStore,
             relationshipStore: relationshipStore,
-            videoSharePublisher: videoSharePublisher
-        )
-        let followCoordinator = FollowCoordinator(
-            identityManager: identityManager,
-            relationshipStore: relationshipStore,
-            directMessageOutbox: directMessageOutbox,
-            nostrClient: nostrClient,
-            relayDirectory: relayDirectory
+            videoSharePublisher: videoSharePublisher,
+            marmotShareService: marmotShareService
         )
         let reportCoordinator = ReportCoordinator(
             reportStore: reportStore,
             remoteVideoStore: remoteVideoStore,
-            videoLibrary: videoLibrary,
-            directMessageOutbox: directMessageOutbox,
+            marmotShareService: marmotShareService,
             keyStore: keyStore,
-            backendClient: backendClient,
-            safetyStore: safetyConfigurationStore,
             storagePaths: storagePaths,
             relationshipStore: relationshipStore,
-            followCoordinator: followCoordinator
+            groupMembershipCoordinator: groupMembershipCoordinator
         )
 
         let activeProfile = (try? profileStore.fetchProfiles().first) ?? ProfileModel.placeholder()
@@ -340,18 +375,22 @@ enum StorageModeError: Error {
             parentProfilePublisher: parentProfilePublisher,
             childProfilePublisher: childProfilePublisher,
             childProfileStore: childProfileStore,
+            mdkActor: mdkActor,
+            marmotTransport: marmotTransport,
+            marmotShareService: marmotShareService,
+            marmotProjectionStore: marmotProjectionStore,
             cryptoService: cryptoService,
             nostrClient: nostrClient,
             relayDirectory: relayDirectory,
             syncCoordinator: syncCoordinator,
-            directMessageOutbox: directMessageOutbox,
             likeStore: likeStore,
             likePublisher: likePublisher,
             storageRouter: storageRouter,
             videoSharePublisher: videoSharePublisher,
             videoShareCoordinator: videoShareCoordinator,
             relationshipStore: relationshipStore,
-            followCoordinator: followCoordinator,
+            parentKeyPackageStore: parentKeyPackageStore,
+            groupMembershipCoordinator: groupMembershipCoordinator,
             reportStore: reportStore,
             reportCoordinator: reportCoordinator,
             backendClient: backendClient,
@@ -365,6 +404,10 @@ enum StorageModeError: Error {
             onboardingState: onboardingState,
             storageModeSelection: storageMode
         )
+
+        Task {
+            await marmotProjectionStore.start()
+        }
 
         if onboardingState == .ready {
             Task {
@@ -462,6 +505,7 @@ enum StorageModeError: Error {
         } catch {
             assertionFailure("Failed to clear storage directories: \(error)")
         }
+        parentKeyPackageStore.removeAll()
 
         if let bundleID = Bundle.main.bundleIdentifier {
             userDefaults.removePersistentDomain(forName: bundleID)

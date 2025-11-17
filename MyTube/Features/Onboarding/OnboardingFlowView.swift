@@ -783,7 +783,7 @@ extension OnboardingFlowView {
                 errorMessage = message
                 return message
             }
-            guard parentIdentity != nil else {
+            guard let parentIdentity = parentIdentity else {
                 let message = "Generate or import the parent key first."
                 errorMessage = message
                 return message
@@ -827,6 +827,11 @@ extension OnboardingFlowView {
                     identity: identity,
                     nameOverride: trimmed
                 )
+                try await ensureChildGroup(
+                    for: identity,
+                    parentIdentity: parentIdentity,
+                    preferredName: trimmed
+                )
                 refreshChildEntries()
                 errorMessage = nil
                 Task {
@@ -852,7 +857,7 @@ extension OnboardingFlowView {
                 errorMessage = "Paste the child nsec before importing."
                 return
             }
-            guard parentIdentity != nil else {
+            guard let parentIdentity = parentIdentity else {
                 errorMessage = "Import or generate the parent key first."
                 return
             }
@@ -875,6 +880,20 @@ extension OnboardingFlowView {
                 lastCreatedChildID = identity.profile.id
                 if childEntries.count == 1 {
                     environment.switchProfile(identity.profile)
+                }
+                Task {
+                    do {
+                        try await ensureChildGroup(
+                            for: identity,
+                            parentIdentity: parentIdentity,
+                            preferredName: trimmedName
+                        )
+                        refreshChildEntries()
+                    } catch {
+                        await MainActor.run {
+                            self.errorMessage = error.localizedDescription
+                        }
+                    }
                 }
                 errorMessage = nil
                 Task {
@@ -1040,6 +1059,45 @@ extension OnboardingFlowView {
             return false
         }
 
+        private func ensureChildGroup(
+            for identity: ChildIdentity,
+            parentIdentity: ParentIdentity,
+            preferredName: String
+        ) async throws {
+            guard identity.profile.mlsGroupId == nil else { return }
+
+            let relays = await environment.relayDirectory.currentRelayURLs()
+            guard !relays.isEmpty else {
+                throw GroupMembershipWorkflowError.relaysUnavailable
+            }
+            let relayStrings = relays.map(\.absoluteString)
+
+            let keyPackageResult = try await environment.mdkActor.createKeyPackage(
+                forPublicKey: parentIdentity.publicKeyHex,
+                relays: relayStrings
+            )
+            try await environment.marmotTransport.publish(
+                jsonEvent: keyPackageResult.keyPackage,
+                relayOverride: relays
+            )
+
+            let request = GroupMembershipCoordinator.CreateGroupRequest(
+                creatorPublicKeyHex: parentIdentity.publicKeyHex,
+                memberKeyPackageEventsJson: [keyPackageResult.keyPackage],
+                name: "\(preferredName) Family",
+                description: "Secure sharing for \(preferredName)",
+                relays: relayStrings,
+                adminPublicKeys: [parentIdentity.publicKeyHex],
+                relayOverride: relays
+            )
+
+            let response = try await environment.groupMembershipCoordinator.createGroup(request: request)
+            try environment.profileStore.updateGroupId(
+                response.result.group.mlsGroupId,
+                forProfileId: identity.profile.id
+            )
+        }
+
         struct ChildEntry: Identifiable {
             let identity: ChildIdentity
             let delegation: ChildDelegation?
@@ -1163,7 +1221,7 @@ private struct IntroSlide {
         ),
         IntroSlide(
             title: "Stay In Control",
-            subtitle: "Approve follows, manage profiles, and share safely from the Parent Zone whenever you need.",
+            subtitle: "Approve Marmot invites, manage profiles, and share safely from the Parent Zone whenever you need.",
             iconName: "shield.lefthalf.fill",
             accent: Color(red: 0.46, green: 0.94, blue: 0.87),
             gradient: [
@@ -1173,7 +1231,7 @@ private struct IntroSlide {
         ),
         IntroSlide(
             title: "Private By Design",
-            subtitle: "Link trusted devices with secure follow invites that pair parent and child keys automatically.",
+            subtitle: "Link trusted families with secure Marmot invites that pair parent and child keys automatically.",
             iconName: "qrcode.viewfinder",
             accent: Color(red: 0.78, green: 0.86, blue: 1.0),
             gradient: [
@@ -1199,7 +1257,7 @@ private struct ChildIdentityCard: View {
             IdentityCard(
                 title: "npub",
                 value: entry.publicKey,
-                subtitle: "Share with followers and relatives."
+                subtitle: "Share with trusted families joining your Marmot group."
             )
 
             if let secret = entry.secretKey {

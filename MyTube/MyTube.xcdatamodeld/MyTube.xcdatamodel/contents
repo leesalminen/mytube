@@ -11,6 +11,7 @@
         <attribute name="id" optional="NO" attributeType="UUID" usesScalarValueType="NO"/>
         <attribute name="name" optional="NO" attributeType="String"/>
         <attribute name="theme" optional="NO" attributeType="String"/>
+        <attribute name="mlsGroupId" optional="YES" attributeType="String"/>
     </entity>
     <entity name="RankingState" representedClassName="RankingStateEntity" syncable="YES" codeGenerationType="class">
         <attribute name="exploreRate" optional="NO" attributeType="Double" defaultValueString="0.15"/>
