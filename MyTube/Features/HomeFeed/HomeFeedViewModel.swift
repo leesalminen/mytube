@@ -251,40 +251,63 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     private struct DisplayContext {
         let groupName: String?
         let localProfileIds: Set<String>  // Local child profile IDs
-        let remoteParentNames: [String: String]  // Remote parent key -> display name
+        let localParentName: String?
+        let remoteParentKey: String?
+        let remoteParentName: String?
     }
     
     private func buildDisplayContext(environment: AppEnvironment) async -> DisplayContext {
-        // Get group name if we're in exactly one group
+        // Get group info if we're in exactly one group
         var groupName: String?
+        var remoteParentKey: String?
+        
         do {
             let groups = try await environment.mdkActor.getGroups()
             if groups.count == 1, let group = groups.first {
                 groupName = group.name
+                
+                // Get group members to find the remote parent
+                let memberKeys = try await environment.mdkActor.getMembers(inGroup: group.mlsGroupId)
+                let localParentKey = try? environment.identityManager.parentIdentity()?.publicKeyHex.lowercased()
+                
+                // Find the first member that's not us - that's the remote parent
+                remoteParentKey = memberKeys.first { memberKey in
+                    memberKey.lowercased() != localParentKey
+                }
             }
         } catch {
             // Ignore
+        }
+        
+        // Get local parent's name
+        var localParentName: String?
+        if let localParentKey = try? environment.identityManager.parentIdentity()?.publicKeyHex,
+           let profile = try? environment.parentProfileStore.profile(for: localParentKey) {
+            localParentName = profile.displayName ?? profile.name
+        }
+        
+        // Get remote parent's name if available
+        var remoteParentName: String?
+        if let remoteKey = remoteParentKey,
+           let profile = try? environment.parentProfileStore.profile(for: remoteKey) {
+            remoteParentName = profile.displayName ?? profile.name
         }
         
         // Get local child profile IDs (to identify if a video is from ourselves)
         var localProfileIds: Set<String> = []
         if let localProfiles = try? environment.profileStore.fetchProfiles() {
             for profile in localProfiles {
-                // Profile ID as hex without dashes
                 let profileIdHex = profile.id.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
                 localProfileIds.insert(profileIdHex)
             }
         }
         
-        // Get remote parent names from published parent profiles
-        var remoteParentNames: [String: String] = [:]
-        // For now, we'll infer from the group - if not from us, show the group name
-        // Later we can enhance this to fetch parent profile metadata
-        
         return DisplayContext(
             groupName: groupName,
             localProfileIds: localProfileIds,
-            remoteParentNames: remoteParentNames
+            localParentName: localParentName,
+            remoteParentKey: remoteParentKey,
+            remoteParentName: remoteParentName
         )
     }
     
@@ -301,15 +324,17 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             return "My Videos"  // This is from our own profile - shouldn't show in remote section
         }
         
-        // Strategy 2: Videos from remote families
-        // Since we can't determine the exact remote child name (no Nostr keys),
-        // show it as being from the group/family
-        if let groupName = context.groupName {
-            // For single group, show "Friend's Family" or the group name
-            return "Shared from \(groupName)"
+        // Strategy 2: Show remote parent's name if available
+        if let remoteName = context.remoteParentName {
+            return remoteName
         }
         
-        // Strategy 3: Fallback for multi-group scenarios
+        // Strategy 3: Use group name (might contain both parent names like "Alice & Bob's Family")
+        if let groupName = context.groupName {
+            return groupName
+        }
+        
+        // Strategy 4: Fallback
         return "Trusted Family"
     }
 

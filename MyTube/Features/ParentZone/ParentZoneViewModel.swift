@@ -1136,11 +1136,18 @@ final class ParentZoneViewModel: ObservableObject {
         }
         let relayStrings = relays.map(\.absoluteString)
         
+        // Build group name with both parent names
+        let groupName = await buildGroupName(
+            localParentKey: parentIdentity.publicKeyHex,
+            remoteParentKey: normalizedParentKey,
+            childName: child.displayName
+        )
+        
         // Create group with remote parent as the initial member (creator is added automatically)
         let request = GroupMembershipCoordinator.CreateGroupRequest(
             creatorPublicKeyHex: parentIdentity.publicKeyHex,
             memberKeyPackageEventsJson: keyPackages,  // Remote parent as initial member
-            name: "\(child.displayName) Family",
+            name: groupName,
             description: "Secure sharing for \(child.displayName)",
             relays: relayStrings,
             adminPublicKeys: [parentIdentity.publicKeyHex],
@@ -1752,6 +1759,35 @@ final class ParentZoneViewModel: ObservableObject {
         refreshGroupSummaries(mlsGroupId: welcome.mlsGroupId)
     }
     
+    private func buildGroupName(
+        localParentKey: String,
+        remoteParentKey: String?,
+        childName: String
+    ) async -> String {
+        // Get local parent's name
+        let localParentName: String
+        if let localProfile = try? environment.parentProfileStore.profile(for: localParentKey),
+           let name = localProfile.displayName ?? localProfile.name {
+            localParentName = name
+        } else {
+            localParentName = "Me"
+        }
+        
+        // Get remote parent's name if available
+        if let remoteKey = remoteParentKey,
+           let remoteProfile = try? environment.parentProfileStore.profile(for: remoteKey),
+           let remoteName = remoteProfile.displayName ?? remoteProfile.name {
+            // Both names available
+            return "\(localParentName) & \(remoteName)'s Family"
+        } else if remoteParentKey != nil {
+            // Remote parent exists but no published name
+            return "\(localParentName) & Friend's Family"
+        } else {
+            // No remote parent yet (solo group)
+            return "\(localParentName)'s \(childName)"
+        }
+    }
+    
     private func tryLinkGroupToChildProfile(groupId: String, groupName: String) async {
         print("🔗 Trying to link group \(groupId.prefix(16))... to child profile...")
         print("   Group name: '\(groupName)'")
@@ -2061,10 +2097,17 @@ final class ParentZoneViewModel: ObservableObject {
         latestParentKeyPackage = keyPackage
 
         // Creator is automatically added to the group, don't include in member list
+        // Build simple group name for solo groups (no remote parent yet)
+        let groupName = await buildGroupName(
+            localParentKey: parentIdentity.publicKeyHex,
+            remoteParentKey: nil,
+            childName: preferredName
+        )
+        
         let request = GroupMembershipCoordinator.CreateGroupRequest(
             creatorPublicKeyHex: parentIdentity.publicKeyHex,
             memberKeyPackageEventsJson: [],  // Empty - creator joins automatically
-            name: "\(preferredName) Family",
+            name: groupName,
             description: "Secure sharing for \(preferredName)",
             relays: relayStrings,
             adminPublicKeys: [parentIdentity.publicKeyHex],
