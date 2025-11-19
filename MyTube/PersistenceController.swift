@@ -92,7 +92,11 @@ final class PersistenceController {
     }
 
     private static func buildContainer(inMemory: Bool, storeURL: URL?) -> NSPersistentContainer {
-        let container = NSPersistentContainer(name: "MyTube")
+        func loadContainer() -> (NSPersistentContainer, NSError?) {
+            let container = NSPersistentContainer(
+                name: "MyTube",
+                managedObjectModel: PersistenceController.managedObjectModel
+            )
 
         let description: NSPersistentStoreDescription
         if let existingDescription = container.persistentStoreDescriptions.first {
@@ -119,14 +123,61 @@ final class PersistenceController {
         description.shouldInferMappingModelAutomatically = true
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
 
-        container.loadPersistentStores { _, error in
-            if let error {
-                fatalError("Failed to load persistent stores: \(error)")
+            var loadError: NSError?
+            container.loadPersistentStores { _, error in
+                if let error = error as NSError? {
+                    loadError = error
+                }
             }
+            return (container, loadError)
+        }
+
+        func removeStoreFiles(at url: URL) {
+            let fm = FileManager.default
+            let basePath = url.deletingPathExtension().path
+            let paths = [
+                url.path,
+                "\(basePath)-wal",
+                "\(basePath)-shm"
+            ]
+            for path in paths {
+                try? fm.removeItem(atPath: path)
+            }
+        }
+
+        var (container, error) = loadContainer()
+        if let loadError = error, !inMemory {
+            if let url = container.persistentStoreDescriptions.first?.url {
+                removeStoreFiles(at: url)
+            }
+            (container, error) = loadContainer()
+            if let retryError = error {
+                fatalError("Failed to load persistent stores after reset: \(retryError)")
+            }
+        } else if let loadError = error {
+            fatalError("Failed to load persistent stores: \(loadError)")
         }
 
         return container
     }
+
+    private static let managedObjectModel: NSManagedObjectModel = {
+        func modelURL(in bundle: Bundle) -> URL? {
+            if let url = bundle.url(forResource: "MyTube", withExtension: "momd") {
+                return url
+            }
+            return bundle.url(forResource: "MyTube", withExtension: "mom")
+        }
+
+        let appBundle = Bundle.allBundles.first { $0.bundleURL.pathExtension == "app" }
+        let candidates = [appBundle, Bundle.main, Bundle(for: PersistenceController.self)].compactMap { $0 }
+        for bundle in candidates {
+            if let url = modelURL(in: bundle), let model = NSManagedObjectModel(contentsOf: url) {
+                return model
+            }
+        }
+        fatalError("Unable to load MyTube data model")
+    }()
 }
 
 /// Seeds a small set of data for previews and UI tests.

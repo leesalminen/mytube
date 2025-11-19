@@ -23,7 +23,7 @@ actor RelayDirectory {
         static let relays = "com.mytube.relays"
     }
 
-    nonisolated(unsafe) private let userDefaults: UserDefaults
+    private let userDefaults: UserDefaults
     private var endpoints: [Endpoint]
 
     init(userDefaults: UserDefaults = .standard) {
@@ -34,7 +34,7 @@ actor RelayDirectory {
         } else {
             endpoints = RelayDirectory.defaultEndpoints()
         }
-        persist()
+        persistSnapshot()
     }
 
     func currentRelayURLs() -> [URL] {
@@ -52,12 +52,12 @@ actor RelayDirectory {
             return
         }
         endpoints.append(Endpoint(urlString: url.absoluteString, isEnabled: enabled))
-        persist()
+        persistSnapshot()
     }
 
     func removeRelay(_ url: URL) {
         endpoints.removeAll { $0.urlString.caseInsensitiveCompare(url.absoluteString) == .orderedSame }
-        persist()
+        persistSnapshot()
     }
 
     func setRelay(_ url: URL, enabled: Bool) {
@@ -66,21 +66,26 @@ actor RelayDirectory {
             return
         }
         endpoints[index].isEnabled = enabled
-        persist()
+        persistSnapshot()
     }
 
     func replaceAll(with urls: [URL]) {
         endpoints = urls.map { Endpoint(urlString: $0.absoluteString, isEnabled: true) }
         endpoints = RelayDirectory.mergeDefaults(with: endpoints)
-        persist()
+        persistSnapshot()
     }
 
     func resetToDefaults() {
         endpoints = RelayDirectory.defaultEndpoints()
-        persist()
+        persistSnapshot()
     }
 
-    private func persist() {
+    private func persistSnapshot() {
+        let snapshot = endpoints
+        persist(endpoints: snapshot)
+    }
+
+    nonisolated(unsafe) private func persist(endpoints: [Endpoint]) {
         guard let data = try? JSONEncoder().encode(endpoints) else {
             return
         }

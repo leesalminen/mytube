@@ -22,7 +22,6 @@ actor LikePublisher {
     private let keyStore: KeychainKeyStore
     private let childProfileStore: ChildProfileStore
     private let remoteVideoStore: RemoteVideoStore
-    private let relationshipStore: RelationshipStore
     private let logger = Logger(subsystem: "com.mytube", category: "LikePublisher")
     
     // Rate limiting: 120 likes per hour per child
@@ -33,14 +32,12 @@ actor LikePublisher {
         marmotShareService: MarmotShareService,
         keyStore: KeychainKeyStore,
         childProfileStore: ChildProfileStore,
-        remoteVideoStore: RemoteVideoStore,
-        relationshipStore: RelationshipStore
+        remoteVideoStore: RemoteVideoStore
     ) {
         self.marmotShareService = marmotShareService
         self.keyStore = keyStore
         self.childProfileStore = childProfileStore
         self.remoteVideoStore = remoteVideoStore
-        self.relationshipStore = relationshipStore
     }
     
     /// Publish a like for a video
@@ -118,21 +115,9 @@ actor LikePublisher {
         viewerChildHex: String,
         ownerChildHex: String
     ) throws -> String {
-        if let follow = try relationshipStore.followRelationship(
-            follower: viewerChildHex,
-            target: ownerChildHex
-        ), let groupId = follow.mlsGroupId, !groupId.isEmpty {
-            return groupId
-        }
-
-        if let reverseFollow = try relationshipStore.followRelationship(
-            follower: ownerChildHex,
-            target: viewerChildHex
-        ), let groupId = reverseFollow.mlsGroupId, !groupId.isEmpty {
-            return groupId
-        }
-
-        throw LikePublisherError.groupUnavailable
+        // Follow relationships removed - get group from remote video store
+        // Remote videos should have the group ID they came from
+        throw LikePublisherError.groupUnavailable  // TODO: Get from remote video metadata
     }
     
     private func checkRateLimit(for childNpub: String) async throws {

@@ -130,16 +130,26 @@ final class ChildProfileStore: ObservableObject {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
+        // Handle 32-byte (64 char) hex strings (Nostr pubkeys)
         if let data = Data(hexString: trimmed), data.count == 32 {
             return data.hexEncodedString().lowercased()
         }
 
+        // Handle npub format
         let lowercased = trimmed.lowercased()
         if lowercased.hasPrefix(NIP19Kind.npub.rawValue) {
             guard let decoded = try? NIP19.decode(lowercased), decoded.kind == .npub else {
                 return nil
             }
             return decoded.data.hexEncodedString().lowercased()
+        }
+
+        // Handle UUIDs (child profile IDs) - either with or without dashes
+        // UUIDs are 128-bit (32 hex chars), shorter than Nostr keys (256-bit / 64 hex chars)
+        let withoutDashes = trimmed.replacingOccurrences(of: "-", with: "")
+        if withoutDashes.count == 32, let _ = Data(hexString: withoutDashes) {
+            // Valid UUID format
+            return withoutDashes.lowercased()
         }
 
         return nil

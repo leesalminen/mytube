@@ -375,7 +375,7 @@ final class MarmotTransportTests: XCTestCase {
         }
 
         let signer = NostrEventSigner()
-        let sealCipher = try cryptoService.encryptDirectMessage(
+        let sealCipher = try cryptoService.encryptGiftWrapEnvelope(
             rumorData,
             senderPrivateKeyData: welcomer.privateKeyData,
             recipientPublicKeyXOnly: recipientData
@@ -392,7 +392,7 @@ final class MarmotTransportTests: XCTestCase {
         }
 
         let ephemeralPair = try NostrKeyPair(secretKey: NostrSDK.SecretKey.generate())
-        let wrapCipher = try cryptoService.encryptDirectMessage(
+        let wrapCipher = try cryptoService.encryptGiftWrapEnvelope(
             sealData,
             senderPrivateKeyData: ephemeralPair.privateKeyData,
             recipientPublicKeyXOnly: recipientData

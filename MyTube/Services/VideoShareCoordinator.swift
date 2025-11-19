@@ -14,7 +14,6 @@ import OSLog
 final class VideoShareCoordinator {
     private let persistence: PersistenceController
     private let keyStore: KeychainKeyStore
-    private let relationshipStore: RelationshipStore
     private let videoSharePublisher: VideoSharePublisher
     private let marmotShareService: MarmotShareService
     private let logger = Logger(subsystem: "com.mytube", category: "VideoShareCoordinator")
@@ -23,18 +22,15 @@ final class VideoShareCoordinator {
     private var pendingVideoIDs: Set<UUID> = []
     private var inflightVideoIDs: Set<UUID> = []
     private var cancellables: Set<AnyCancellable> = []
-    private var cachedFollowRelationships: [FollowModel] = []
 
     init(
         persistence: PersistenceController,
         keyStore: KeychainKeyStore,
-        relationshipStore: RelationshipStore,
         videoSharePublisher: VideoSharePublisher,
         marmotShareService: MarmotShareService
     ) {
         self.persistence = persistence
         self.keyStore = keyStore
-        self.relationshipStore = relationshipStore
         self.videoSharePublisher = videoSharePublisher
         self.marmotShareService = marmotShareService
 
@@ -48,16 +44,17 @@ final class VideoShareCoordinator {
             }
         }
 
-        relationshipStore.followRelationshipsPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] relationships in
-                guard let self else { return }
-                self.cachedFollowRelationships = relationships
-                Task { await self.retryPendingShares() }
+        // Relationship store removed - using MDK groups directly
+        // Group changes trigger via NotificationCenter.marmotStateDidChange
+        NotificationCenter.default.addObserver(
+            forName: .marmotStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { [weak self] in
+                await self?.retryPendingShares()
             }
-            .store(in: &cancellables)
-
-        relationshipStore.refreshAll()
+        }
     }
 
     deinit {
@@ -145,34 +142,21 @@ final class VideoShareCoordinator {
                 logger.info("Skipping share; parent identity missing.")
                 return
             }
-            guard let childPair = try keyStore.fetchKeyPair(role: .child(id: video.profileId)) else {
-                logger.info("Skipping share; child identity missing for profile \(video.profileId.uuidString, privacy: .public).")
-                return
-            }
+            
+            // Children no longer have keys - use profile ID as identifier
+            let childProfileId = video.profileId.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+            let ownerChildKey = childProfileId  // Use profile ID instead of child pubkey
 
-            let localParentHex = parentPair.publicKeyHex.lowercased()
-            let childHex = childPair.publicKeyHex.lowercased()
-            let ownerChildKey = childPair.publicKeyBech32 ?? childPair.publicKeyHex
-
-            let followRelationships: [FollowModel]
-            if cachedFollowRelationships.isEmpty {
-                followRelationships = try relationshipStore.fetchFollowRelationships()
-                cachedFollowRelationships = followRelationships
-            } else {
-                followRelationships = cachedFollowRelationships
-            }
-
-            let groupIds = targetGroups(
-                from: followRelationships,
-                targetChildHex: childHex
-            )
-
-            guard !groupIds.isEmpty else {
-                logger.debug("No active Marmot groups for video \(video.id.uuidString, privacy: .public); deferring share.")
-                logFollowDiagnostics(targetChildHex: childHex, localParentHex: localParentHex)
+            // Get the group ID for this child's profile
+            guard let profile = try? persistence.viewContext.fetch(ProfileEntity.fetchRequest()).first(where: { $0.id == video.profileId }),
+                  let groupId = profile.mlsGroupId else {
+                logger.debug("No Marmot group for video \(video.id.uuidString, privacy: .public); deferring share.")
                 pendingVideoIDs.insert(video.id)
                 return
             }
+
+            logger.info("📤 Sharing video \(video.id.uuidString, privacy: .public) to group \(groupId.prefix(16), privacy: .public)... for profile \(video.profileId.uuidString, privacy: .public)")
+            let groupIds = [groupId]
 
             let shareMessage = try await videoSharePublisher.makeShareMessage(
                 video: video,
@@ -221,36 +205,5 @@ final class VideoShareCoordinator {
         }
     }
 
-    private func targetGroups(
-        from relationships: [FollowModel],
-        targetChildHex: String
-    ) -> [String] {
-        var groups: Set<String> = []
-        for follow in relationships where follow.isFullyApproved {
-            let isTarget = follow.targetChildHex()?.caseInsensitiveCompare(targetChildHex) == .orderedSame
-            let isFollower = follow.followerChildHex()?.caseInsensitiveCompare(targetChildHex) == .orderedSame
-            guard isTarget || isFollower else { continue }
-            guard let groupId = follow.mlsGroupId, !groupId.isEmpty else { continue }
-            groups.insert(groupId)
-        }
-        return Array(groups)
-    }
-
-    private func logFollowDiagnostics(targetChildHex: String, localParentHex: String) {
-        guard !cachedFollowRelationships.isEmpty else { return }
-        for follow in cachedFollowRelationships {
-            let isTarget = follow.targetChildHex()?.caseInsensitiveCompare(targetChildHex) == .orderedSame
-            let isFollower = follow.followerChildHex()?.caseInsensitiveCompare(targetChildHex) == .orderedSame
-            guard isTarget || isFollower else { continue }
-            let remoteParents = follow.remoteParentKeys(localParentHex: localParentHex)
-            logger.debug(
-                """
-                Follow candidate follower \(follow.followerChild, privacy: .public) \
-                target \(follow.targetChild, privacy: .public) status \(follow.status.rawValue, privacy: .public) \
-                approvedFrom \(follow.approvedFrom) approvedTo \(follow.approvedTo) \
-                remoteParents \(remoteParents)
-                """
-            )
-        }
-    }
+    // Follow relationship logic removed - using MDK groups directly
 }

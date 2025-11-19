@@ -1,4 +1,4 @@
-The following documentation is extracted from the "Rust Nostr Book," focusing on the core API usage, excluding introductory, getting started, and donation sections. Code examples are provided in **Swift** as it had the most complete code blocks in the source material.
+The following documentation is extracted from the "Rust Nostr Book," focusing on the core API usage, excluding introductory, getting started, and donation sections. Code examples are provided in **Swift** as it had the most complete code blocks in the source material. This is an archival reference; MyTube now relies on Marmot/MDK for all messaging.
 
 ---
 
@@ -184,28 +184,6 @@ let events2 = try await client.fetchEventsFrom(
 
 ## Core NIP Implementations
 
-### NIP-44: Encrypted Payloads (Versioned)
-
-This NIP defines a versioned scheme for encrypting event payloads.
-
-```swift
-import NostrSDK
-// ...
-func nip44() throws {
-    let keys = Keys.generate()
-    let publickey = try PublicKey.parse(publicKey:
-        "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
-
-    let ciphertext = try nip44Encrypt(secretKey: keys.secretKey(), publicKey:
-        publickey, content: "my message", version: Nip44Version.v2)
-    print("Encrypted: \(ciphertext)");
-
-    let plaintext = try nip44Decrypt(secretKey: keys.secretKey(), publickey:
-        publickey, payload: ciphertext)
-    print("Decrypted: \(plaintext)");
-}
-```
-
 ### NIP-49: Private Key Encryption
 
 This NIP defines a method for clients to encrypt and decrypt a user's private key with a password (`ncryptsec`).
@@ -308,9 +286,8 @@ The following NIPs are documented as part of the `rust-nostr` library but are ma
 | **NIP-05** | Mapping Nostr keys to DNS-based internet identifiers | Allows using a DNS-based internet identifier (e.g., `user@domain.com`) as metadata. |
 | **NIP-06** | Basic key derivation from mnemonic seed phrase | Defines deriving Nostr keys from a mnemonic seed phrase using BIP-32 and BIP-39. |
 | **NIP-07** | `window.nostr` capability for web browsers | Standardizes browser extension capabilities. |
-| **NIP-17** | Private Direct Messages | Defines an encrypted direct messaging scheme using NIP-44, NIP-59, and gift wraps. |
 | **NIP-19** | bech32-encoded entities | Defines bech32 encoding for Nostr entities (e.g., `npub`, `nsec`, `note`, `nprofile`, `nevent`, `nrelay`, `naddr`). |
 | **NIP-21** | nostr URI scheme | Defines the `nostr:` URI scheme for interoperability. |
 | **NIP-46** | Nostr Remote Signing | (Nostr Connect) Protocol for remote signing. (**TODO**) |
 | **NIP-47** | Nostr Wallet Connect | Protocol for connecting Nostr clients to a wallet. (**TODO**) |
-| **NIP-59** | Gift Wrap | Used in Private Direct Messages. (**TODO**) |
+| **NIP-59** | Gift Wrap | Envelope format used by Marmot welcomes/gift wraps. (**TODO**) |

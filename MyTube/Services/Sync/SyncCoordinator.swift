@@ -18,9 +18,9 @@ actor SyncCoordinator {
     private let nostrClient: NostrClient
     private let relayDirectory: RelayDirectory
     private let marmotTransport: MarmotTransport
+    private let mdkActor: any MarmotMdkClient & MarmotMessageQuerying
     private let eventReducer: NostrEventReducer
     private let keyStore: KeychainKeyStore
-    private let relationshipStore: RelationshipStore
     private let parentProfileStore: ParentProfileStore
     private let childProfileStore: ChildProfileStore
     private var eventTask: Task<Void, Never>?
@@ -36,9 +36,9 @@ actor SyncCoordinator {
         nostrClient: NostrClient,
         relayDirectory: RelayDirectory,
         marmotTransport: MarmotTransport,
+        mdkActor: any MarmotMdkClient & MarmotMessageQuerying,
         keyStore: KeychainKeyStore,
         cryptoService: CryptoEnvelopeService,
-        relationshipStore: RelationshipStore,
         parentProfileStore: ParentProfileStore,
         childProfileStore: ChildProfileStore,
         likeStore: LikeStore,
@@ -50,8 +50,8 @@ actor SyncCoordinator {
         self.nostrClient = nostrClient
         self.relayDirectory = relayDirectory
         self.marmotTransport = marmotTransport
+        self.mdkActor = mdkActor
         self.keyStore = keyStore
-        self.relationshipStore = relationshipStore
         self.parentProfileStore = parentProfileStore
         self.childProfileStore = childProfileStore
         self.eventReducer = NostrEventReducer(
@@ -59,7 +59,6 @@ actor SyncCoordinator {
                 persistence: persistence,
                 keyStore: keyStore,
                 cryptoService: cryptoService,
-                relationshipStore: relationshipStore,
                 parentProfileStore: parentProfileStore,
                 childProfileStore: childProfileStore,
                 likeStore: likeStore,
@@ -143,6 +142,7 @@ actor SyncCoordinator {
 
         let snapshot = await gatherTrackedKeys()
         let parentHex = snapshot.parent
+        let groupNostrKeys = snapshot.groupNostrKeys
         var pointerKeys = snapshot.childKeys
         pointerKeys.formUnion(snapshot.remoteParentKeys)
         if let parentHex { pointerKeys.insert(parentHex) }
@@ -175,6 +175,11 @@ actor SyncCoordinator {
         if let parentHex {
             metadataKeySet.insert(parentHex)
         }
+        logger.debug("📋 Subscription keys: parent=\(parentHex?.prefix(16) ?? "none"), remote=\(snapshot.remoteParentKeys.count), children=\(snapshot.childKeys.count)")
+        for remoteKey in snapshot.remoteParentKeys.prefix(3) {
+            logger.debug("   Remote parent: \(remoteKey.prefix(16))...")
+        }
+        
         let metadataAuthors = metadataKeySet.compactMap { try? NostrSDK.PublicKey.parse(publicKey: $0) }
         if !metadataAuthors.isEmpty {
             var metadataFilter = Filter()
@@ -195,17 +200,23 @@ actor SyncCoordinator {
         }
 
         if !metadataAuthors.isEmpty {
+            logger.debug("📡 Subscribing to Marmot events for \(metadataAuthors.count) author(s)")
+            
             var keyPackageFilter = Filter()
             keyPackageFilter = keyPackageFilter.kinds(kinds: marmotKeyPackageKinds)
             keyPackageFilter = keyPackageFilter.authors(authors: metadataAuthors)
             keyPackageFilter = keyPackageFilter.since(timestamp: sinceTimestamp)
             filters.append(keyPackageFilter)
 
+            // For kind 445 (group evolution), we need to filter by the #h tag
+            // However, NostrSDK's Filter API doesn't easily support custom single-letter tags
+            // As a workaround, subscribe to ALL kind 445 events and filter them in handleIncoming
+            // This is acceptable since kind 445 events are rare (only group evolution)
             var groupFilter = Filter()
-            groupFilter = groupFilter.kinds(kinds: marmotMembershipKinds)
-            groupFilter = groupFilter.authors(authors: metadataAuthors)
+            groupFilter = groupFilter.kinds(kinds: marmotMembershipKinds)  // Kind 445
             groupFilter = groupFilter.since(timestamp: sinceTimestamp)
             filters.append(groupFilter)
+            logger.debug("   ✅ Added kind 445 (group) filter for ALL groups (will filter by #h tag in handleIncoming)")
         }
 
         var welcomeRecipientPubkeys: [NostrSDK.PublicKey] = []
@@ -262,49 +273,59 @@ actor SyncCoordinator {
         }
     }
 
-    private func gatherTrackedKeys() async -> (parent: String?, childKeys: Set<String>, remoteParentKeys: Set<String>) {
+    private func gatherTrackedKeys() async -> (parent: String?, childKeys: Set<String>, remoteParentKeys: Set<String>, groupNostrKeys: Set<String>) {
         var parentHex: String?
         if let parentPair = try? keyStore.fetchKeyPair(role: .parent) {
             parentHex = parentPair.publicKeyHex.lowercased()
         }
 
-        var childKeys: Set<String> = []
-        if let identifiers = try? keyStore.childKeyIdentifiers() {
-            for id in identifiers {
-                if let pair = try? keyStore.fetchKeyPair(role: .child(id: id)) {
-                    childKeys.insert(pair.publicKeyHex.lowercased())
+        // Children no longer have separate Nostr keys - they are just profiles
+        // So childKeys will be empty
+        let childKeys: Set<String> = []
+        var remoteParents: Set<String> = []
+        
+        // Get all group members AND group Nostr keys from MDK
+        // We need both parent member keys and the group's own Nostr public key
+        var groupNostrKeys: Set<String> = []
+        do {
+            let groups = try await mdkActor.getGroups()
+            logger.debug("🔍 Found \(groups.count) MDK group(s) for subscription")
+            for group in groups {
+                // Add the group's Nostr public key (used for #h tag filtering in kind 445 events)
+                let groupKey = group.nostrGroupId.lowercased()
+                groupNostrKeys.insert(groupKey)
+                logger.debug("   Group: \(group.name) (MLS: \(group.mlsGroupId.prefix(16))..., Nostr: \(groupKey.prefix(16))...)")
+                
+                // Also get member keys for metadata/key package subscriptions
+                do {
+                    // getMembers returns [String] of public key hex values
+                    let memberKeys = try await mdkActor.getMembers(inGroup: group.mlsGroupId)
+                    logger.debug("      Members: \(memberKeys.count)")
+                    for memberHex in memberKeys {
+                        let normalized = memberHex.lowercased()
+                        // Add non-local keys to remote parents
+                        if let parentHex = parentHex, normalized != parentHex {
+                            remoteParents.insert(normalized)
+                        } else if parentHex == nil {
+                            remoteParents.insert(normalized)
+                        }
+                    }
+                } catch {
+                    logger.debug("Failed to get members for group \(group.mlsGroupId, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
             }
+        } catch {
+            logger.debug("Failed to get groups for subscription: \(error.localizedDescription, privacy: .public)")
         }
 
-        let snapshot = await relationshipStore.followKeySnapshot()
-        childKeys.formUnion(snapshot.childKeys)
+        logger.debug("   Returning \(groupNostrKeys.count) group Nostr key(s), \(remoteParents.count) remote parent(s)")
 
-        let remoteParents: Set<String>
-        if let parent = parentHex {
-            remoteParents = Set(
-                snapshot.parentKeys.filter {
-                    $0.caseInsensitiveCompare(parent) != ComparisonResult.orderedSame
-                }
-            )
-        } else {
-            remoteParents = snapshot.parentKeys
-        }
-
-        return (parentHex, childKeys, remoteParents)
+        return (parentHex, childKeys, remoteParents, groupNostrKeys)
     }
 
     private func localChildPublicKeys() -> [NostrSDK.PublicKey] {
-        guard let identifiers = try? keyStore.childKeyIdentifiers() else { return [] }
-        var results: [NostrSDK.PublicKey] = []
-        results.reserveCapacity(identifiers.count)
-        for id in identifiers {
-            guard
-                let pair = try? keyStore.fetchKeyPair(role: .child(id: id)),
-                let key = try? NostrSDK.PublicKey.parse(publicKey: pair.publicKeyHex.lowercased())
-            else { continue }
-            results.append(key)
-        }
-        return results
+        // Children no longer have Nostr keys - only parent needs to receive welcomes
+        // Return empty array since welcome subscriptions will be handled via parent key
+        return []
     }
 }

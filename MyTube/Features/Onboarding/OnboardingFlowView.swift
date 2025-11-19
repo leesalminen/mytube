@@ -794,16 +794,13 @@ extension OnboardingFlowView {
                 identity = existing.identity
             } else {
                 do {
-                    var created = try environment.identityManager.createChildIdentity(
+                    let created = try environment.identityManager.createChildIdentity(
                         name: trimmed,
                         theme: theme,
                         avatarAsset: theme.defaultAvatarAsset
                     )
-                    if let delegation = created.delegation {
-                        delegationCache[created.profile.id] = delegation
-                    }
                     let wasEmpty = childEntries.isEmpty
-                    upsertChildEntry(created, delegation: created.delegation)
+                    upsertChildEntry(created, delegation: nil)
                     if wasEmpty {
                         environment.switchProfile(created.profile)
                     }
@@ -827,11 +824,8 @@ extension OnboardingFlowView {
                     identity: identity,
                     nameOverride: trimmed
                 )
-                try await ensureChildGroup(
-                    for: identity,
-                    parentIdentity: parentIdentity,
-                    preferredName: trimmed
-                )
+                // Don't create group yet - MLS requires at least 2 members
+                // Group will be created when first follow is established
                 refreshChildEntries()
                 errorMessage = nil
                 Task {
@@ -846,62 +840,9 @@ extension OnboardingFlowView {
         }
 
         func importChildForParent(name: String, secret: String, theme: ThemeDescriptor) {
-            let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let trimmedSecret = secret.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            guard !trimmedName.isEmpty else {
-                errorMessage = "Enter a name for the child profile."
-                return
-            }
-            guard !trimmedSecret.isEmpty else {
-                errorMessage = "Paste the child nsec before importing."
-                return
-            }
-            guard let parentIdentity = parentIdentity else {
-                errorMessage = "Import or generate the parent key first."
-                return
-            }
-
-            do {
-                var identity = try environment.identityManager.importChildIdentity(
-                    trimmedSecret,
-                    profileName: trimmedName,
-                    theme: theme,
-                    avatarAsset: theme.defaultAvatarAsset
-                )
-                let delegation = try environment.identityManager.issueDelegation(
-                    to: identity,
-                    conditions: DelegationConditions.defaultChild()
-                )
-                identity.delegation = delegation
-                delegationCache[identity.profile.id] = delegation
-                upsertChildEntry(identity, delegation: delegation)
-                childSecretVisibility.insert(identity.profile.id)
-                lastCreatedChildID = identity.profile.id
-                if childEntries.count == 1 {
-                    environment.switchProfile(identity.profile)
-                }
-                Task {
-                    do {
-                        try await ensureChildGroup(
-                            for: identity,
-                            parentIdentity: parentIdentity,
-                            preferredName: trimmedName
-                        )
-                        refreshChildEntries()
-                    } catch {
-                        await MainActor.run {
-                            self.errorMessage = error.localizedDescription
-                        }
-                    }
-                }
-                errorMessage = nil
-                Task {
-                    await environment.syncCoordinator.refreshSubscriptions()
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+            // Child import removed - children don't have separate keys
+            // This method is now deprecated and should not be called
+            errorMessage = "Child key import is no longer supported. Children are profiles owned by parents."
         }
 
         func finishParentFlow() {
@@ -1072,18 +1013,24 @@ extension OnboardingFlowView {
             }
             let relayStrings = relays.map(\.absoluteString)
 
+            // Create key package for parent - MDK requires at least one key package (the creator's)
             let keyPackageResult = try await environment.mdkActor.createKeyPackage(
                 forPublicKey: parentIdentity.publicKeyHex,
                 relays: relayStrings
             )
+            let keyPackageEvent = try KeyPackageEventEncoder.encode(
+                result: keyPackageResult,
+                signingKey: parentIdentity.keyPair
+            )
             try await environment.marmotTransport.publish(
-                jsonEvent: keyPackageResult.keyPackage,
+                jsonEvent: keyPackageEvent,
                 relayOverride: relays
             )
 
+            // Creator is automatically added to the group, don't include in member list
             let request = GroupMembershipCoordinator.CreateGroupRequest(
                 creatorPublicKeyHex: parentIdentity.publicKeyHex,
-                memberKeyPackageEventsJson: [keyPackageResult.keyPackage],
+                memberKeyPackageEventsJson: [],  // Empty - creator joins automatically
                 name: "\(preferredName) Family",
                 description: "Secure sharing for \(preferredName)",
                 relays: relayStrings,
@@ -1100,23 +1047,22 @@ extension OnboardingFlowView {
 
         struct ChildEntry: Identifiable {
             let identity: ChildIdentity
-            let delegation: ChildDelegation?
+            let delegation: ChildDelegation?  // Deprecated, kept for compatibility
 
             var id: UUID { identity.profile.id }
             var profile: ProfileModel { identity.profile }
-
+            
+            // Child keys removed - these return profile IDs now
             var publicKey: String {
-                identity.publicKeyBech32 ?? identity.publicKeyHex
+                identity.publicKeyHex
             }
-
+            
             var secretKey: String? {
-                identity.secretKeyBech32 ?? identity.keyPair.privateKeyData.hexEncodedString()
+                nil  // Children don't have secret keys anymore
             }
-
+            
             var delegationTagDisplay: String? {
-                guard let tag = delegation?.nostrTag else { return nil }
-                let formatted = ([tag.name, tag.value] + tag.otherParameters).joined(separator: ", ")
-                return "[\(formatted)]"
+                nil  // Delegations are deprecated
             }
         }
     }

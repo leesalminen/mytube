@@ -52,6 +52,7 @@ actor VideoSharePublisher {
     func makeShareMessage(
         video: VideoModel,
         ownerChildNpub: String,
+        childName: String? = nil,
         options: VideoShareOptions = .default
     ) async throws -> VideoShareMessage {
         let stage = try await stageUpload(video: video, ownerChildNpub: ownerChildNpub)
@@ -81,6 +82,8 @@ actor VideoSharePublisher {
         return VideoShareMessage(
             videoId: video.id.uuidString,
             ownerChild: ownerChildNpub,
+            childName: childName,
+            childProfileId: video.profileId.uuidString,
             meta: meta,
             blob: stage.videoBlob,
             thumb: stage.thumbBlob,

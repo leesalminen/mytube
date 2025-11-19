@@ -87,6 +87,12 @@ actor GroupMembershipCoordinator {
     }
 
     func createGroup(request: CreateGroupRequest) async throws -> CreateGroupResponse {
+        logger.debug("🏗️ createGroup called:")
+        logger.debug("   Creator: \(request.creatorPublicKeyHex.prefix(16))...")
+        logger.debug("   Members: \(request.memberKeyPackageEventsJson.count) key packages")
+        logger.debug("   Name: \(request.name)")
+        logger.debug("   Admins: \(request.adminPublicKeys.count)")
+        
         let result = try await mdkActor.createGroup(
             creatorPublicKey: request.creatorPublicKeyHex,
             memberKeyPackageEventsJson: request.memberKeyPackageEventsJson,
@@ -95,17 +101,29 @@ actor GroupMembershipCoordinator {
             relays: request.relays,
             admins: request.adminPublicKeys
         )
+        logger.debug("✅ MDK group created: \(result.group.mlsGroupId.prefix(16))...")
+        
         let publishResult = try await marmotTransport.publish(
             createGroupResult: result,
             keyPackageEventsJson: request.memberKeyPackageEventsJson,
             relayOverride: request.relayOverride
         )
         logger.debug("Created MDK group \(result.group.mlsGroupId, privacy: .public) and published \(publishResult.welcomeGiftWraps.count) gift wraps.")
-        NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        
+        // Post notification on main thread to avoid threading warnings
+        await MainActor.run {
+            NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        }
+        
         return CreateGroupResponse(result: result, publishResult: publishResult)
     }
 
     func addMembers(request: AddMembersRequest) async throws -> AddMembersResponse {
+        logger.debug("📦 addMembers called with \(request.keyPackageEventsJson.count) key package events")
+        for (index, eventJson) in request.keyPackageEventsJson.enumerated() {
+            logger.debug("   Key package event [\(index)]: \(eventJson.prefix(200))...")
+        }
+        
         let result = try await mdkActor.addMembers(
             mlsGroupId: request.mlsGroupId,
             keyPackageEventsJson: request.keyPackageEventsJson
@@ -116,7 +134,12 @@ actor GroupMembershipCoordinator {
             relayOverride: request.relayOverride
         )
         logger.debug("Added members to group \(request.mlsGroupId, privacy: .public); published \(publishResult.welcomeGiftWraps.count) gift wraps.")
-        NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        
+        // Post notification on main thread to avoid threading warnings
+        await MainActor.run {
+            NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        }
+        
         return AddMembersResponse(result: result, publishResult: publishResult)
     }
 
@@ -130,7 +153,12 @@ actor GroupMembershipCoordinator {
             relayOverride: request.relayOverride
         )
         logger.debug("Removed members from group \(request.mlsGroupId, privacy: .public); published commit \(publishResult.evolutionEvent.idHex, privacy: .public).")
-        NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        
+        // Post notification on main thread to avoid threading warnings
+        await MainActor.run {
+            NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        }
+        
         return RemoveMembersResponse(result: result, publishResult: publishResult)
     }
 }

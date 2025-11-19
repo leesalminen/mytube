@@ -17,17 +17,17 @@ This document captures the complete protocol, crypto, storage, and product requi
 
 ---
 
-## 1. Identities, Keys, Delegation
+## 1. Identities, Keys, and Parent-Only Model
 
-### Roles
-- **Parent:** Owns decisions; authenticates actions; holds a Nostr keypair (`npub`/`nsec`).
-- **Child device:** Own keypair; delegated by a parent via NIP-26 (restricted kinds and time-bound).
+### Identity Model (Updated Nov 2025)
+- **Parent/Household:** Holds a single Nostr keypair (`npub`/`nsec`). This identity joins Marmot groups and signs all outbound events.
+- **Child Profile:** Local-only profile with UUID, display name, theme, and avatar. NO separate Nostr key. Children are metadata in video payloads.
 
 ### Key Rules
-- Parents store keys in Secure Enclave and expose read-only `npub` in UI for linking.
-- Delegation (NIP-26): parent issues delegation to child device key.
-  - Example conditions: `kind=4543/4544/4545/4546/4547`, `since=<now-1d>`, `until=<now+365d>`, optional `kind=30301` if child publishes follow pointers; otherwise approvals stay on parent.
-- Apps must verify delegations for every child-signed event.
+- **Only parents have keys**: Generated via `nostr-sdk-swift`, stored in Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
+- **Children identified by UUID**: Profile IDs (128-bit UUIDs) used as stable identifiers in video share messages.
+- **NIP-26 delegations**: DEPRECATED. Previously used for child devices; no longer needed since children don't have keys.
+- **Group membership**: Only parent pubkeys appear in Marmot groups. Children never join groups directly.
 
 ---
 
@@ -47,7 +47,7 @@ This document captures the complete protocol, crypto, storage, and product requi
 ### Marmot Messaging
 - MDK maintains MLS sessions per child group; `MarmotShareService` encodes payloads as JSON, calls `mdk.createMessage`, and tags them with the appropriate `MarmotMessageKind` (`kind 4543`–`4547`).
 - Rumor events are published via `MarmotTransport` to every relay backing the child’s group. Gift wraps (NIP-59) are only used for welcomes so new members can decrypt `welcomeRumorsJson`.
-- No standalone NIP-44 direct messages remain; MLS handles confidentiality and membership enforcement.
+- Messaging now exclusively uses MDK/MLS; confidentiality and membership enforcement live there.
 
 ### Media Encryption (Blobs)
 - Per-video content key `Vk`: 32 random bytes.
@@ -74,12 +74,12 @@ Rationale: XChaCha for long nonces and robust file encryption; X25519 + HKDF for
 - Use NIP-33 replaceables where we still need public pointers.
 
 ### Replaceable (NIP-33) Kinds
-- **kind 30301 — Child follow pointer**
-  - `d = "mytube/follow:<followerChildPub>:<targetChildPub>"`.
-- **kind 30302 — Video tombstone (optional)**
+- **kind 30301 — Child follow pointer**: DEPRECATED. Follow relationships replaced by MDK group membership.
+- **kind 30302 — Video tombstone**
   - `d = "mytube/video:<video_id>"`.
+  - Published when video is deleted to notify all group members.
 
-Replaceables carry no PII; they provide “latest pointer” handles. Status details now live in MDK (MLS) state.
+Replaceables carry no PII; they provide "latest pointer" handles.
 
 ### Marmot Core Event Kinds
 - **kind 443 — Key package** (`MarmotEventKind.keyPackage`)
@@ -104,58 +104,51 @@ All Marmot payloads include:
 - `by` — `npub` of signer (parent or delegated child key)
 - Optional `v` (e.g. `"v": 1`) for forward compatibility.
 
-### 5.1 Follow (two approvals: from / to)
-- Type: `t = "mytube/follow"`
-- Recipients: all parents of both families (sent to the child’s MDK group).
+### 5.1 Follow Messages - DEPRECATED
 
-```json
-{
-  "t": "mytube/follow",
-  "follower_child": "npubChildX",
-  "target_child":   "npubChildY",
-  "approved_from": true,
-  "approved_to":   false,
-  "status": "pending | active | revoked | blocked",
-  "by": "npubSignerParent",
-  "ts": 1730000100
-}
-```
+**Follow relationships have been removed** in favor of MDK group membership. The social graph is now determined entirely by who is in which Marmot groups.
 
-Rules:
-- Follower’s parent sets `approved_from = true`.
-- Target’s parent sets `approved_to = true`.
-- When both flags are true, the follow becomes `active`.
-- Either side may set `revoked` or `blocked`.
+**Migration**: Fresh installs required. No backward compatibility with follow-based builds.
 
-### 5.2 Video Share (per recipient)
+**Replacement**: Use MDK APIs directly:
+- `mdkActor.getGroups()` - list all groups the parent is in
+- `mdkActor.getMembers(inGroup:)` - see who's in each group
+- `groupMembershipCoordinator.addMembers()` - invite another family
+- `groupMembershipCoordinator.removeMembers()` - remove a family
+
+### 5.2 Video Share (Parent-Only Groups)
 - Type: `t = "mytube/video_share"`
-- Recipients: every member of the viewer child’s MDK group (viewer child key + their parents).
+- Recipients: All members of the child profile's associated Marmot group (parent identities only).
+- Author: Always the parent's key, with child metadata in payload.
 
 ```json
 {
   "t": "mytube/video_share",
   "video_id": "uuid-v4",
-  "owner_child": "npubChildOwner",
+  "owner_child": "profile-uuid-without-dashes",
+  "child_name": "Emma",
+  "child_profile_id": "uuid-v4-of-profile",
   "meta": { "title": "optional", "dur": 94, "created_at": 1730000200 },
   "blob": { "url": "https://minio.example.com/media/x/y/z.mp4.enc", "mime": "video/mp4", "len": 12345678 },
   "thumb": { "url": "https://minio.example.com/thumbs/x/y/z.jpg.enc", "mime": "image/jpeg", "len": 54321 },
   "crypto": {
     "alg_media": "xchacha20poly1305_v1",
     "nonce_media": "base64-24B",
-    "alg_wrap": "x25519-hkdf-chacha20poly1305_v1",
-    "wrap": {
-      "ephemeral_pub": "npubEs",
-      "wrap_salt": "base64-32B",
-      "wrap_nonce": "base64-12B",
-      "key_wrapped": "base64"
-    }
+    "media_key": "base64-32B"
   },
   "policy": { "visibility": "followers", "expires_at": null, "version": 1 },
-  "by": "npubSignerParentOrDelegatedChild",
+  "by": "npubParent",
   "ts": 1730000300,
   "v": 1
 }
 ```
+
+**Changes from previous version**:
+- `owner_child`: Now contains child profile UUID (32 hex chars) instead of child npub (64 hex chars)
+- `child_name`: New field for display purposes ("From: Family – Emma (7)")
+- `child_profile_id`: Explicit UUID for client-side correlation
+- `crypto.wrap`: Removed - MLS handles encryption, no per-recipient wrapping needed
+- `by`: Always parent npub (children don't sign)
 
 ### 5.3 Video Revoke (stop showing)
 - Type: `t = "mytube/video_revoke"`

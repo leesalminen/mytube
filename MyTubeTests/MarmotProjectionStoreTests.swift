@@ -36,8 +36,8 @@ final class MarmotProjectionStoreTests: XCTestCase {
         let defaultsSuite = "MarmotProjectionStoreTests.defaults.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: defaultsSuite)!
         defaults.removePersistentDomain(forName: defaultsSuite)
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: defaultsSuite)
+        addTeardownBlock { [defaultsSuite] in
+            UserDefaults(suiteName: defaultsSuite)?.removePersistentDomain(forName: defaultsSuite)
         }
 
         let stubMdk = StubMessageQueryClient()
@@ -185,8 +185,8 @@ final class MarmotProjectionStoreTests: XCTestCase {
         let defaultsSuite = "MarmotProjectionStoreTests.incremental.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: defaultsSuite)!
         defaults.removePersistentDomain(forName: defaultsSuite)
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: defaultsSuite)
+        addTeardownBlock { [defaultsSuite] in
+            UserDefaults(suiteName: defaultsSuite)?.removePersistentDomain(forName: defaultsSuite)
         }
 
         let notificationCenter = NotificationCenter()
@@ -353,6 +353,7 @@ final class MarmotProjectionStoreTests: XCTestCase {
 private actor StubMessageQueryClient: MarmotMessageQuerying {
     var groups: [Group] = []
     var messagesByGroup: [String: [Message]] = [:]
+    var membersByGroup: [String: [String]] = [:]
 
     func setGroups(_ groups: [Group]) {
         self.groups = groups
@@ -361,9 +362,17 @@ private actor StubMessageQueryClient: MarmotMessageQuerying {
     func setMessages(_ messages: [String: [Message]]) {
         self.messagesByGroup = messages
     }
+    
+    func setMembers(_ members: [String: [String]]) {
+        self.membersByGroup = members
+    }
 
     func getGroups() throws -> [Group] {
         groups
+    }
+    
+    func getMembers(inGroup mlsGroupId: String) throws -> [String] {
+        membersByGroup[mlsGroupId] ?? []
     }
 
     func getMessages(inGroup mlsGroupId: String) throws -> [Message] {

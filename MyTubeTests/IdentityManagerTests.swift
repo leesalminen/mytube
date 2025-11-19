@@ -22,10 +22,8 @@ final class IdentityManagerTests: XCTestCase {
         let keyStore = KeychainKeyStore(service: "IdentityManagerTests.\(UUID().uuidString)")
         defer {
             try? keyStore.removeKeyPair(role: .parent)
-            try? keyStore.removeKeyPair(role: .child(id: profile.id))
         }
         try? keyStore.removeKeyPair(role: .parent)
-        try? keyStore.removeKeyPair(role: .child(id: profile.id))
 
         let identityManager = IdentityManager(keyStore: keyStore, profileStore: profileStore)
 
@@ -38,15 +36,14 @@ final class IdentityManagerTests: XCTestCase {
         let fetchedParent = try identityManager.parentIdentity()
         XCTAssertEqual(fetchedParent?.publicKeyHex, parent.publicKeyHex)
 
-        let child = try identityManager.ensureChildIdentity(for: profile)
-        XCTAssertNotNil(child.publicKeyBech32)
-
-        if let secret = child.secretKeyBech32 {
-            let imported = try identityManager.importChildIdentity(secret, for: profile)
-            XCTAssertEqual(imported.publicKeyHex, child.publicKeyHex)
-        } else {
-            XCTFail("Expected child nsec to be encodable")
-        }
+        // Children are now just profiles without separate keys
+        let child = identityManager.childIdentity(for: profile)
+        XCTAssertNotNil(child)
+        XCTAssertEqual(child?.profile.id, profile.id)
+        // Child "public key" is now just the profile ID
+        XCTAssertNotNil(child?.publicKeyHex)
+        // Children don't have secret keys
+        XCTAssertNil(child?.secretKeyBech32)
     }
 
     func testCreateAndImportChildProfile() throws {
@@ -64,18 +61,18 @@ final class IdentityManagerTests: XCTestCase {
             avatarAsset: "avatar.dolphin"
         )
         XCTAssertEqual(created.profile.name, "Nova")
-        XCTAssertNotNil(created.delegation)
-
-        guard let secret = created.secretKeyBech32 else {
-            return XCTFail("Expected child nsec")
-        }
-
-        let imported = try identityManager.importChildIdentity(
-            secret,
-            profileName: "Nova Backup",
+        // Children don't have delegations anymore
+        XCTAssertNil(created.delegation)
+        // Children don't have secret keys
+        XCTAssertNil(created.secretKeyBech32)
+        
+        // Test creating another child profile
+        let second = try identityManager.createChildIdentity(
+            name: "Nova Backup",
             theme: .ocean,
             avatarAsset: "avatar.dolphin"
         )
-        XCTAssertEqual(imported.profile.name, "Nova Backup")
+        XCTAssertEqual(second.profile.name, "Nova Backup")
+        XCTAssertNotEqual(second.publicKeyHex, created.publicKeyHex)  // Different profile IDs
     }
 }

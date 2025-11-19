@@ -40,7 +40,6 @@ final class AppEnvironment: ObservableObject {
     let storageRouter: StorageRouter
     let videoSharePublisher: VideoSharePublisher
     let videoShareCoordinator: VideoShareCoordinator
-    let relationshipStore: RelationshipStore
     let parentKeyPackageStore: ParentKeyPackageStore
     let groupMembershipCoordinator: any GroupMembershipCoordinating
     let reportStore: ReportStore
@@ -95,7 +94,6 @@ final class AppEnvironment: ObservableObject {
         storageRouter: StorageRouter,
         videoSharePublisher: VideoSharePublisher,
         videoShareCoordinator: VideoShareCoordinator,
-        relationshipStore: RelationshipStore,
         parentKeyPackageStore: ParentKeyPackageStore,
         groupMembershipCoordinator: any GroupMembershipCoordinating,
         reportStore: ReportStore,
@@ -141,7 +139,6 @@ final class AppEnvironment: ObservableObject {
         self.storageRouter = storageRouter
         self.videoSharePublisher = videoSharePublisher
         self.videoShareCoordinator = videoShareCoordinator
-        self.relationshipStore = relationshipStore
         self.parentKeyPackageStore = parentKeyPackageStore
         self.groupMembershipCoordinator = groupMembershipCoordinator
         self.reportStore = reportStore
@@ -157,13 +154,16 @@ final class AppEnvironment: ObservableObject {
         self.onboardingState = onboardingState
         self.storageModeSelection = storageModeSelection
 
-        relationshipStore.followRelationshipsPublisher
-            .dropFirst()
-            .sink { [weak self] _ in
-                guard let self else { return }
-                Task { await self.syncCoordinator.refreshSubscriptions() }
-            }
-            .store(in: &cancellables)
+        // Relationship store removed - using MDK groups directly
+        // Group changes trigger subscription refresh via NotificationCenter.marmotStateDidChange
+        NotificationCenter.default.addObserver(
+            forName: .marmotStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { await self.syncCoordinator.refreshSubscriptions() }
+        }
 }
 
 enum StorageModeError: Error {
@@ -225,7 +225,6 @@ enum StorageModeError: Error {
             persistenceController: persistence,
             childProfileStore: childProfileStore
         )
-        let relationshipStore = RelationshipStore(persistence: persistence)
         let reportStore = ReportStore(persistence: persistence)
         let marmotProjectionStore = MarmotProjectionStore(
             mdkActor: mdkActor,
@@ -257,9 +256,9 @@ enum StorageModeError: Error {
             nostrClient: nostrClient,
             relayDirectory: relayDirectory,
             marmotTransport: marmotTransport,
+            mdkActor: mdkActor,
             keyStore: keyStore,
             cryptoService: cryptoService,
-            relationshipStore: relationshipStore,
             parentProfileStore: parentProfileStore,
             childProfileStore: childProfileStore,
             likeStore: likeStore,
@@ -272,8 +271,7 @@ enum StorageModeError: Error {
             marmotShareService: marmotShareService,
             keyStore: keyStore,
             childProfileStore: childProfileStore,
-            remoteVideoStore: remoteVideoStore,
-            relationshipStore: relationshipStore
+            remoteVideoStore: remoteVideoStore
         )
         let legacyDefault = "http://127.0.0.1:8080"
         let managedDefault = "https://auth.tubestr.app"
@@ -339,7 +337,6 @@ enum StorageModeError: Error {
         let videoShareCoordinator = VideoShareCoordinator(
             persistence: persistence,
             keyStore: keyStore,
-            relationshipStore: relationshipStore,
             videoSharePublisher: videoSharePublisher,
             marmotShareService: marmotShareService
         )
@@ -349,7 +346,6 @@ enum StorageModeError: Error {
             marmotShareService: marmotShareService,
             keyStore: keyStore,
             storagePaths: storagePaths,
-            relationshipStore: relationshipStore,
             groupMembershipCoordinator: groupMembershipCoordinator
         )
 
@@ -388,7 +384,6 @@ enum StorageModeError: Error {
             storageRouter: storageRouter,
             videoSharePublisher: videoSharePublisher,
             videoShareCoordinator: videoShareCoordinator,
-            relationshipStore: relationshipStore,
             parentKeyPackageStore: parentKeyPackageStore,
             groupMembershipCoordinator: groupMembershipCoordinator,
             reportStore: reportStore,
@@ -482,6 +477,7 @@ enum StorageModeError: Error {
     func resetApp() async {
         await syncCoordinator.stop()
 
+        // Clear non-file-based data first
         do {
             try parentAuth.clearPin()
         } catch {
@@ -494,17 +490,6 @@ enum StorageModeError: Error {
             assertionFailure("Failed to clear key store: \(error)")
         }
 
-        do {
-            try persistence.resetStores()
-        } catch {
-            assertionFailure("Failed to reset persistence: \(error)")
-        }
-
-        do {
-            try storagePaths.clearAllContents()
-        } catch {
-            assertionFailure("Failed to clear storage directories: \(error)")
-        }
         parentKeyPackageStore.removeAll()
 
         if let bundleID = Bundle.main.bundleIdentifier {
@@ -514,8 +499,28 @@ enum StorageModeError: Error {
 
         await relayDirectory.resetToDefaults()
 
+        // Reset CoreData stores
+        do {
+            try persistence.resetStores()
+        } catch {
+            assertionFailure("Failed to reset persistence: \(error)")
+        }
+
+        // Clear storage directories (including MDK database)
+        // WARNING: MDK SQLite connection cannot be closed while app is running
+        // The app MUST be force-quit after this operation to avoid I/O errors
+        do {
+            try storagePaths.clearAllContents()
+        } catch {
+            assertionFailure("Failed to clear storage directories: \(error)")
+        }
+
         activeProfile = (try? profileStore.fetchProfiles().first) ?? ProfileModel.placeholder()
         onboardingState = .needsParentIdentity
+
+        // Force quit the app to properly close all database connections
+        // This is necessary because MDK's SQLite connection cannot be closed gracefully
+        exit(0)
     }
 
     enum OnboardingState {

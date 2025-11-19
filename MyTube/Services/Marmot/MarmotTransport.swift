@@ -62,6 +62,7 @@ actor MarmotTransport {
     private let keyStore: MarmotKeyStore
     private let cryptoService: CryptoEnvelopeService
     private let eventSigner = NostrEventSigner()
+    private let maxLoggedPayloadLength = 256
     private let logger = Logger(subsystem: "com.mytube", category: "MarmotTransport")
 
     init(
@@ -82,8 +83,13 @@ actor MarmotTransport {
     func publish(jsonEvent: String, relayOverride: [URL]? = nil) async throws -> NostrEvent {
         let event = try decodeEvent(from: jsonEvent)
         let relays = try await resolveRelays(override: relayOverride)
+        let pubkey = event.pubkey.prefix(16)
+        logger.info("📤 Publishing kind \(event.kind().asU16()) id \(event.idHex.prefix(16), privacy: .public)... (pubkey: \(pubkey)...) to \(relays.count) relay(s)")
+        for relay in relays {
+            logger.debug("      → \(relay.absoluteString)")
+        }
         try await nostrClient.publish(event: event, to: relays)
-        logger.debug("Published Marmot event kind \(event.kind().asU16()) id \(event.idHex, privacy: .public)")
+        logger.info("   ✅ Published kind \(event.kind().asU16()) id \(event.idHex.prefix(16), privacy: .public)...")
         return event
     }
 
@@ -124,14 +130,17 @@ actor MarmotTransport {
     func handleIncoming(event: NostrEvent) async {
         let kindValue = event.kind().asU16()
         if let kind = MarmotEventKind(rawValue: kindValue) {
+            logger.debug("🔔 MarmotTransport.handleIncoming: kind \(kindValue) id \(event.idHex.prefix(16))...")
             do {
                 switch kind {
                 case .keyPackage:
                     try await ingestKeyPackage(event)
+                case .group:
+                    logger.debug("   ➡️ Processing group evolution event...")
+                    try await ingestGroupEvent(event)
+                    logger.debug("   ✅ Group event processed")
                 case .welcome:
                     try await ingestWelcome(event, wrapperId: event.idHex)
-                case .group:
-                    try await ingestGroupEvent(event)
                 case .giftWrap:
                     try await ingestGiftWrap(event)
                 }
@@ -154,8 +163,19 @@ actor MarmotTransport {
 
     @discardableResult
     func publish(createGroupResult result: CreateGroupResult, keyPackageEventsJson: [String], relayOverride: [URL]? = nil) async throws -> CreateGroupPublishResult {
+        logger.debug("📤 Publishing create group result:")
+        logger.debug("   Group ID: \(result.group.mlsGroupId.prefix(16))...")
+        logger.debug("   Welcome rumors: \(result.welcomeRumorsJson.count)")
+        logger.debug("   Key package events: \(keyPackageEventsJson.count)")
+        
         let overrideRelays = await preferredRelayOverride(forGroupId: result.group.mlsGroupId, fallback: relayOverride)
         let giftWraps = try wrapWelcomeRumors(result.welcomeRumorsJson, keyPackageEventsJson: keyPackageEventsJson)
+        
+        logger.debug("   Generated \(giftWraps.count) gift wrap(s)")
+        for (i, wrap) in giftWraps.enumerated() {
+            logger.debug("   Gift wrap [\(i)] to: \(wrap.pubkey.prefix(16))...")
+        }
+        
         let publishedGiftWraps = try await publish(events: giftWraps, relayOverride: overrideRelays)
         logger.debug("Published \(publishedGiftWraps.count) Marmot welcome gift wraps for group \(result.group.mlsGroupId, privacy: .public)")
         return CreateGroupPublishResult(groupId: result.group.mlsGroupId, welcomeGiftWraps: publishedGiftWraps)
@@ -164,6 +184,7 @@ actor MarmotTransport {
     @discardableResult
     func publish(addMembersResult result: AddMembersResult, keyPackageEventsJson: [String], relayOverride: [URL]? = nil) async throws -> MemberUpdatePublishResult {
         let overrideRelays = await preferredRelayOverride(forGroupId: result.mlsGroupId, fallback: relayOverride)
+        logger.info("Publishing add-members evolution for group \(result.mlsGroupId, privacy: .public)")
         let evolutionEvent = try await publish(jsonEvent: result.evolutionEventJson, relayOverride: overrideRelays)
         let welcomeGiftWraps: [NostrEvent]
         if let welcomeRumors = result.welcomeRumorsJson, !welcomeRumors.isEmpty {
@@ -185,6 +206,7 @@ actor MarmotTransport {
     @discardableResult
     func publish(removeMembersResult result: GroupUpdateResult, relayOverride: [URL]? = nil) async throws -> MemberRemovalPublishResult {
         let overrideRelays = await preferredRelayOverride(forGroupId: result.mlsGroupId, fallback: relayOverride)
+        logger.info("Publishing remove-members evolution for group \(result.mlsGroupId, privacy: .public)")
         let evolutionEvent = try await publish(jsonEvent: result.evolutionEventJson, relayOverride: overrideRelays)
         if let welcomeRumors = result.welcomeRumorsJson, !welcomeRumors.isEmpty {
             logger.warning("Remove-members result unexpectedly contained \(welcomeRumors.count) welcome rumors for group \(result.mlsGroupId, privacy: .public); skipping publish.")
@@ -201,6 +223,7 @@ actor MarmotTransport {
 
     @discardableResult
     func publishMessage(mlsGroupId: String, eventJson: String, relayOverride: [URL]? = nil) async throws -> NostrEvent {
+        logger.info("Publishing Marmot application message for group \(mlsGroupId, privacy: .public)")
         let overrideRelays = await preferredRelayOverride(forGroupId: mlsGroupId, fallback: relayOverride)
         return try await publish(jsonEvent: eventJson, relayOverride: overrideRelays)
     }
@@ -209,7 +232,7 @@ actor MarmotTransport {
         do {
             return try NostrEvent.fromJson(json: json)
         } catch {
-            logger.error("Invalid Marmot event JSON: \(error.localizedDescription, privacy: .public)")
+            logger.error("Invalid Marmot event JSON: \(error.localizedDescription, privacy: .public) payload=\(self.redact(json), privacy: .public)")
             throw TransportError.invalidEventJson
         }
     }
@@ -274,9 +297,11 @@ actor MarmotTransport {
         var wraps: [NostrEvent] = []
         wraps.reserveCapacity(welcomeRumorsJson.count)
 
-        for rumorJson in welcomeRumorsJson {
+        for (i, rumorJson) in welcomeRumorsJson.enumerated() {
             let rumor = try decodeUnsignedEvent(from: rumorJson)
             let welcomerHex = rumor.pubkey.lowercased()
+            logger.debug("💌 Welcome rumor [\(i)]: welcomer=\(welcomerHex.prefix(16))...")
+            
             guard let welcomerKeyPair = signingKeyMap[welcomerHex] else {
                 logger.error("Unable to locate signing key for welcomer \(welcomerHex, privacy: .public)")
                 throw TransportError.signingKeyUnavailable
@@ -285,16 +310,31 @@ actor MarmotTransport {
                 logger.error("Welcome rumor missing key package reference.")
                 throw TransportError.missingKeyPackageReference
             }
+            logger.debug("   References event ID: \(referencedEventId.prefix(16))...")
+            logger.debug("   Key package index keys: \(Array(keyPackageIndex.keys).map { $0.prefix(16) })")
+            
             guard let recipientHex = keyPackageIndex[referencedEventId] else {
                 logger.error("No matching key package for welcome reference \(referencedEventId, privacy: .public)")
+                logger.error("Available event IDs in index: \(Array(keyPackageIndex.keys))")
                 throw TransportError.welcomeRecipientNotFound
             }
+            logger.debug("   Recipient from index: \(recipientHex.prefix(16))...")
 
             let giftWrap = try makeGiftWrap(
                 rumorJson: rumorJson,
                 welcomerKeyPair: welcomerKeyPair,
                 recipientPublicKeyHex: recipientHex
             )
+            logger.debug("   Gift wrap created:")
+            logger.debug("     Event ID: \(giftWrap.idHex.prefix(16))...")
+            logger.debug("     Pubkey (ephemeral): \(giftWrap.pubkey.prefix(16))...")
+            // Log p tags if present
+            if let pTag = giftWrap.rawTags.first(where: { $0.first?.lowercased() == "p" }) {
+                let pValue = pTag.dropFirst().first ?? "none"
+                logger.debug("     P tag: \(pValue.prefix(16))...")
+            } else {
+                logger.debug("     P tag: none")
+            }
             wraps.append(giftWrap)
         }
 
@@ -306,10 +346,12 @@ actor MarmotTransport {
         var index: [String: String] = [:]
         index.reserveCapacity(events.count)
 
-        for json in events {
+        for (i, json) in events.enumerated() {
             let event = try decodeEvent(from: json)
             let idHex = event.idHex.lowercased()
-            index[idHex] = event.pubkey.lowercased()
+            let pubkey = event.pubkey.lowercased()
+            logger.debug("📋 Key package [\(i)] event ID: \(idHex.prefix(16))... pubkey: \(pubkey.prefix(16))...")
+            index[idHex] = pubkey
         }
 
         return index
@@ -324,7 +366,7 @@ actor MarmotTransport {
         do {
             return try decoder.decode(RawUnsignedEvent.self, from: data)
         } catch {
-            logger.error("Failed to decode unsigned Marmot event: \(error.localizedDescription, privacy: .public)")
+            logger.error("Failed to decode unsigned Marmot event: \(error.localizedDescription, privacy: .public) payload=\(self.redact(json), privacy: .public)")
             throw TransportError.invalidEventJson
         }
     }
@@ -340,7 +382,7 @@ actor MarmotTransport {
             throw TransportError.rumorEncodingFailed
         }
 
-        let sealCipher = try cryptoService.encryptDirectMessage(
+        let sealCipher = try cryptoService.encryptGiftWrapEnvelope(
             rumorData,
             senderPrivateKeyData: welcomerKeyPair.privateKeyData,
             recipientPublicKeyXOnly: recipientData
@@ -358,7 +400,7 @@ actor MarmotTransport {
         }
 
         let ephemeralPair = try NostrKeyPair(secretKey: NostrSDK.SecretKey.generate())
-        let wrapCipher = try cryptoService.encryptDirectMessage(
+        let wrapCipher = try cryptoService.encryptGiftWrapEnvelope(
             sealData,
             senderPrivateKeyData: ephemeralPair.privateKeyData,
             recipientPublicKeyXOnly: recipientData
@@ -411,14 +453,21 @@ actor MarmotTransport {
 
     private func processWelcome(rumorJson: String, wrapperId: String) async throws {
         _ = try await mdkActor.processWelcome(wrapperEventId: wrapperId, rumorEventJson: rumorJson)
-        NotificationCenter.default.post(name: .marmotPendingWelcomesDidChange, object: nil)
+        
+        // Post notifications on main thread
+        Task { @MainActor in
+            NotificationCenter.default.post(name: .marmotPendingWelcomesDidChange, object: nil)
+        }
         postMarmotStateDidChange()
+        
         logger.debug("Processed Marmot welcome \(wrapperId, privacy: .public)")
     }
 
     private func processMarmotMessage(_ event: NostrEvent) async throws {
+        logger.debug("📨 Processing Marmot message event \(event.idHex.prefix(16), privacy: .public)")
         let json = try event.asJson()
         let result = try await mdkActor.processMessage(eventJson: json)
+        logger.debug("   ✅ MDK processed message, result type: \(String(describing: result))")
         await handleProcessMessageResult(result, eventId: event.idHex)
     }
 
@@ -428,7 +477,7 @@ actor MarmotTransport {
     ) async {
         switch result {
         case .applicationMessage(let message):
-            logger.debug("Processed Marmot application message \(eventId, privacy: .public)")
+            logger.info("✅ Processed Marmot application message \(eventId.prefix(16), privacy: .public) in group \(message.mlsGroupId.prefix(16), privacy: .public)")
             postMarmotStateDidChange()
             postMarmotMessagesDidChange(groupId: message.mlsGroupId)
 
@@ -482,7 +531,7 @@ actor MarmotTransport {
             throw TransportError.invalidEventJson
         }
 
-        let sealData = try cryptoService.decryptDirectMessage(
+        let sealData = try cryptoService.decryptGiftWrapEnvelope(
             event.content(),
             recipientPrivateKeyData: recipient.privateKeyData,
             senderPublicKeyXOnly: wrapperAuthor
@@ -494,7 +543,7 @@ actor MarmotTransport {
         guard let welcomerKey = Data(hexString: sealEvent.pubkey) else {
             throw TransportError.invalidEventJson
         }
-        let rumorData = try cryptoService.decryptDirectMessage(
+        let rumorData = try cryptoService.decryptGiftWrapEnvelope(
             sealEvent.content(),
             recipientPrivateKeyData: recipient.privateKeyData,
             senderPublicKeyXOnly: welcomerKey
@@ -506,15 +555,19 @@ actor MarmotTransport {
     }
 
     private func postMarmotStateDidChange() {
-        NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        Task { @MainActor in
+            NotificationCenter.default.post(name: .marmotStateDidChange, object: nil)
+        }
     }
 
     private func postMarmotMessagesDidChange(groupId: String) {
-        NotificationCenter.default.post(
-            name: .marmotMessagesDidChange,
-            object: nil,
-            userInfo: ["mlsGroupId": groupId]
-        )
+        Task { @MainActor in
+            NotificationCenter.default.post(
+                name: .marmotMessagesDidChange,
+                object: nil,
+                userInfo: ["mlsGroupId": groupId]
+            )
+        }
     }
 
     private func loadSigningKeyPairs() -> [NostrKeyPair] {
@@ -530,6 +583,14 @@ actor MarmotTransport {
             }
         }
         return pairs
+    }
+
+    private func redact(_ json: String) -> String {
+        if json.count <= maxLoggedPayloadLength {
+            return json
+        }
+        let prefix = json.prefix(maxLoggedPayloadLength)
+        return "\(prefix)…"
     }
 }
 

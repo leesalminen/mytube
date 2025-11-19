@@ -38,6 +38,7 @@ struct ParentZoneView: View {
     @State private var followIsSubmitting = false
     @State private var followSelectedParentKey: String?
     @State private var followParentOptions: [String] = []
+    @State private var followInviteInput: String = ""
     @State private var approvingFollowID: String?
     @State private var parentProfileName: String = ""
     @State private var isPublishingParentProfile = false
@@ -204,7 +205,7 @@ struct ParentZoneView: View {
         .sheet(isPresented: $isRequestingFollow) {
             NavigationStack {
                 Form {
-                    Section("Local Child") {
+                    Section("Pick a Child") {
                         Picker("Local child", selection: $followChildSelection) {
                             ForEach(viewModel.childIdentities) { child in
                                 Text(child.displayName)
@@ -213,51 +214,129 @@ struct ParentZoneView: View {
                         }
                         .pickerStyle(.menu)
                         .disabled(followIsSubmitting)
+                        .onAppear {
+                            if followChildSelection == nil {
+                                followChildSelection = viewModel.childIdentities.first?.id
+                            }
+                        }
                     }
 
-                    Section("Friend Family Keys") {
-                        HStack {
-                            TextField("Friend's child npub or hex", text: $followTargetChildKey)
+                    Section("Share this invite with the other parent") {
+                        if let childId = followChildSelection,
+                           let child = viewModel.childIdentities.first(where: { $0.id == childId }),
+                           let invite = viewModel.followInvite(for: child) {
+                            let summary = "Parent: \(shortKey(invite.parentPublicKey))\nChild: \(shortKey(invite.childPublicKey))"
+                            Text("Copy or scan once so the other parent gets both keys and your Marmot key package.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            QRCodeCard(
+                                title: "\(child.displayName) Marmot Invite",
+                                content: .text(label: "Includes both keys", value: summary),
+                                footer: "Share this exact invite so the group connects in one step.",
+                                copyAction: { copyToPasteboard(invite.encodedURL ?? invite.shareText) },
+                                toggleSecure: nil,
+                                qrValue: invite.encodedURL,
+                                showsShareButton: true,
+                                shareAction: { presentShare(invite.shareItems) }
+                            )
+                        } else {
+                            Text("Select a child to generate their Marmot invite. We package your key automatically so the other parent can't miss it.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Section("Connect using an invite") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Paste the Marmot invite link or scan the QR from the other parent. We auto-fill both keys and keep their Marmot key package so approval works in one step.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            TextField("Paste Marmot invite link or payload", text: $followInviteInput, axis: .vertical)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .font(.system(.footnote).monospaced())
+                                .lineLimit(2...4)
                                 .disabled(followIsSubmitting)
-                            Button {
-                                qrIntent = .followChild
-                            } label: {
-                                Label("Scan child key", systemImage: "qrcode.viewfinder")
-                                    .labelStyle(.iconOnly)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(followIsSubmitting)
-                            .accessibilityLabel("Scan friend child key QR")
-                        }
-                        HStack {
-                            TextField("Friend's parent npub or hex", text: $followTargetParentKey)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .font(.system(.footnote).monospaced())
+
+                            HStack(spacing: 10) {
+                                Button {
+                                    pasteFollowInviteFromClipboard()
+                                } label: {
+                                    Label("Paste", systemImage: "doc.on.clipboard")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                                 .disabled(followIsSubmitting)
-                            Button {
-                                qrIntent = .followParent
-                            } label: {
-                                Label("Scan parent key", systemImage: "qrcode.viewfinder")
-                                    .labelStyle(.iconOnly)
+
+                                Button {
+                                    qrIntent = .followParent
+                                } label: {
+                                    Label("Scan invite", systemImage: "qrcode.viewfinder")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(followIsSubmitting)
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(followIsSubmitting)
-                            .accessibilityLabel("Scan friend parent key QR")
+
+                            if !followTargetChildKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                               !followTargetParentKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Label(
+                                    "Ready to connect \(shortKey(followTargetParentKey)) ↔︎ \(shortKey(followTargetChildKey))",
+                                    systemImage: "checkmark.circle.fill"
+                                )
+                                .foregroundStyle(.green)
+                                .font(.footnote)
+                            }
+
+                            DisclosureGroup("Enter keys manually (fallback)") {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        TextField("Friend's child npub or hex", text: $followTargetChildKey)
+                                            .textInputAutocapitalization(.never)
+                                            .autocorrectionDisabled()
+                                            .font(.system(.footnote).monospaced())
+                                            .disabled(followIsSubmitting)
+                                        Button {
+                                            qrIntent = .followChild
+                                        } label: {
+                                            Label("Scan child key", systemImage: "qrcode.viewfinder")
+                                                .labelStyle(.iconOnly)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        .disabled(followIsSubmitting)
+                                        .accessibilityLabel("Scan friend child key QR")
+                                    }
+
+                                    HStack {
+                                        TextField("Friend's parent npub or hex", text: $followTargetParentKey)
+                                            .textInputAutocapitalization(.never)
+                                            .autocorrectionDisabled()
+                                            .font(.system(.footnote).monospaced())
+                                            .disabled(followIsSubmitting)
+                                        Button {
+                                            qrIntent = .followParent
+                                        } label: {
+                                            Label("Scan parent key", systemImage: "qrcode.viewfinder")
+                                                .labelStyle(.iconOnly)
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        .disabled(followIsSubmitting)
+                                        .accessibilityLabel("Scan friend parent key QR")
+                                    }
+
+                                    Text("Use manual entry only if the invite link is unavailable. Sharing the invite is the most reliable path because it includes the Marmot key package.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
-                        Text("Both parents must accept the Marmot invite before the group opens.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 4)
                     }
 
                     if !followParentOptions.isEmpty {
-                        Section("Approved Parents") {
+                        Section("Families you've approved") {
                             Picker("Linked parent", selection: Binding(
                                 get: { followSelectedParentKey },
                                 set: { newValue in
@@ -275,13 +354,13 @@ struct ParentZoneView: View {
                             }
                             .pickerStyle(.menu)
                             .disabled(followIsSubmitting)
-                            Text("Approved parents appear here after a Marmot invite is accepted, so you can autofill the other family's key.")
+                            Text("Approved parents appear after a Marmot invite is accepted, so you can autofill the other family's key.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     } else {
                         Section {
-                            Text("No approved families yet. Approve a Marmot invite so you know who you're sharing with.")
+                            Text("Approve a Marmot invite to remember trusted families for quick reuse.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -304,6 +383,9 @@ struct ParentZoneView: View {
                     }
                 }
                 .navigationTitle("Marmot Invite")
+                .onChange(of: followInviteInput) { _ in
+                    parseFollowInviteInput()
+                }
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") {
@@ -311,9 +393,17 @@ struct ParentZoneView: View {
                         }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Send") {
+                        Button("Connect") {
                             guard let childId = followChildSelection else {
                                 followFormError = "Select which child is sending the invite."
+                                return
+                            }
+                            parseFollowInviteInput()
+                            guard
+                                !followTargetChildKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                                !followTargetParentKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            else {
+                                followFormError = "Paste or scan the Marmot invite so we can include both keys."
                                 return
                             }
                             followFormError = nil
@@ -765,10 +855,11 @@ private extension ParentZoneView {
     }
 
     private var connectionsSection: some View {
-        let incoming = viewModel.incomingFollowRequests()
-        let outgoing = viewModel.outgoingFollowRequests()
-        let active = viewModel.activeFollowConnections()
-
+        // Get all children with groups
+        let childrenWithGroups = viewModel.childIdentities.filter { child in
+            viewModel.groupSummary(for: child) != nil
+        }
+        
         return insetGroupedList {
             Section("Marmot Invites & Approvals") {
                 Button {
@@ -788,24 +879,30 @@ private extension ParentZoneView {
                 }
             }
 
-            Section("Connection Activity") {
+            Section("Active Marmot Groups") {
                 Button {
                     viewModel.refreshConnections()
+                    viewModel.refreshMarmotDiagnostics()
                 } label: {
-                    Label("Refresh Connections", systemImage: "arrow.clockwise")
+                    Label("Refresh Groups", systemImage: "arrow.clockwise")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                followSection(
-                    incoming: incoming,
-                    outgoing: outgoing,
-                    active: active
-                )
+                if childrenWithGroups.isEmpty {
+                    Text("No active Marmot groups yet. Create a group by sending an invite to another family.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(childrenWithGroups) { child in
+                        activeGroupRow(child: child)
+                    }
+                }
             }
 
-            Section("Marmot Group Invites") {
+            Section("Pending Welcomes") {
                 if viewModel.pendingWelcomes.isEmpty {
                     if viewModel.isRefreshingPendingWelcomes {
                         HStack {
@@ -1795,7 +1892,7 @@ private extension ParentZoneView {
 
         if (intent == .followChild || intent == .followParent),
            let followInvite = ParentZoneViewModel.FollowInvite.decode(from: trimmed) {
-            applyFollowInvite(followInvite)
+            applyFollowInvite(followInvite, rawValue: trimmed)
             return
         }
 
@@ -1829,6 +1926,18 @@ private extension ParentZoneView {
     }
 
     @ViewBuilder
+    private func activeGroupRow(child: ParentZoneViewModel.ChildIdentityItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(child.displayName)
+                .font(.headline)
+            
+            if let summary = viewModel.groupSummary(for: child) {
+                groupSummaryCard(summary: summary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+    
     private func pendingWelcomeRow(_ welcome: ParentZoneViewModel.PendingWelcomeItem) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top) {
@@ -1876,7 +1985,8 @@ private extension ParentZoneView {
 
                 Button("Accept") {
                     Task {
-                        await viewModel.acceptWelcome(welcome)
+                        // Auto-link to first available child
+                        await viewModel.acceptWelcome(welcome, linkToChildId: nil)
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -1930,11 +2040,16 @@ private extension ParentZoneView {
         }
     }
 
-    func applyFollowInvite(_ invite: ParentZoneViewModel.FollowInvite) {
+    func applyFollowInvite(_ invite: ParentZoneViewModel.FollowInvite, rawValue: String? = nil) {
         followTargetChildKey = invite.childPublicKey
         followTargetParentKey = invite.parentPublicKey
         followSelectedParentKey = matchingParentOption(for: invite.parentPublicKey, in: followParentOptions)
         followFormError = nil
+        if let encoded = invite.encodedURL {
+            followInviteInput = encoded
+        } else if let raw = rawValue, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            followInviteInput = raw
+        }
         viewModel.storePendingKeyPackages(from: invite)
     }
 
@@ -2023,6 +2138,7 @@ private extension ParentZoneView {
         followChildSelection = viewModel.childIdentities.first?.id
         followTargetChildKey = ""
         followTargetParentKey = ""
+        followInviteInput = ""
         followSelectedParentKey = nil
         followParentOptions = []
         followFormError = nil
@@ -2035,10 +2151,27 @@ private extension ParentZoneView {
         followChildSelection = nil
         followTargetChildKey = ""
         followTargetParentKey = ""
+        followInviteInput = ""
         followSelectedParentKey = nil
         followParentOptions = []
         followFormError = nil
         followIsSubmitting = false
+    }
+
+    func parseFollowInviteInput() {
+        let trimmed = followInviteInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        guard let invite = ParentZoneViewModel.FollowInvite.decode(from: trimmed) else { return }
+        applyFollowInvite(invite, rawValue: trimmed)
+        if let encoded = invite.encodedURL, encoded != followInviteInput {
+            followInviteInput = encoded
+        }
+    }
+
+    func pasteFollowInviteFromClipboard() {
+        guard let string = UIPasteboard.general.string else { return }
+        followInviteInput = string
+        parseFollowInviteInput()
     }
 
     func copyToPasteboard(_ value: String) {

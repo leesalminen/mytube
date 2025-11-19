@@ -47,13 +47,13 @@ struct CryptoEnvelopeServiceTests {
         }
     }
 
-    @Test("NIP-44 direct messages decrypt with matching keys")
-    func directMessageRoundTrip() throws {
+    @Test("Gift-wrap envelopes decrypt with matching keys")
+    func giftWrapEnvelopeRoundTrip() throws {
         let sender = try service.generateSigningKeyPair()
         let recipient = try service.generateSigningKeyPair()
         let plaintext = Data("Let's build rockets!".utf8)
 
-        let encrypted = try service.encryptDirectMessage(
+        let encrypted = try service.encryptGiftWrapEnvelope(
             plaintext,
             senderPrivateKeyData: sender.privateKey,
             recipientPublicKeyXOnly: recipient.publicKeyXOnly
@@ -62,14 +62,14 @@ struct CryptoEnvelopeServiceTests {
         let decoded = try #require(Data(base64Encoded: encrypted))
         #expect(decoded.first == 0x02)
 
-        let decrypted = try service.decryptDirectMessage(
+        let decrypted = try service.decryptGiftWrapEnvelope(
             encrypted,
             recipientPrivateKeyData: recipient.privateKey,
             senderPublicKeyXOnly: sender.publicKeyXOnly
         )
         #expect(decrypted == plaintext)
 
-        let encryptedAgain = try service.encryptDirectMessage(
+        let encryptedAgain = try service.encryptGiftWrapEnvelope(
             plaintext,
             senderPrivateKeyData: sender.privateKey,
             recipientPublicKeyXOnly: recipient.publicKeyXOnly

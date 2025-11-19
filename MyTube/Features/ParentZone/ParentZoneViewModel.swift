@@ -119,7 +119,8 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var childIdentities: [ChildIdentityItem] = []
     @Published var childSecretVisibility: Set<UUID> = []
     @Published private(set) var publishingChildIDs: Set<UUID> = []
-    @Published var followRelationships: [FollowModel] = []
+    // Follow relationships removed - using MDK groups directly
+    @Published var followRelationships: [FollowModel] = []  // Deprecated, always empty
     @Published var reports: [ReportModel] = []
     @Published var storageMode: StorageModeSelection = .managed
     @Published var entitlement: CloudEntitlement?
@@ -173,14 +174,7 @@ final class ParentZoneViewModel: ObservableObject {
         loadStoredBYOConfig()
         backendEndpoint = environment.backendEndpointString()
 
-        environment.relationshipStore.followRelationshipsPublisher
-            .map { follows in
-                follows.sorted { $0.updatedAt > $1.updatedAt }
-            }
-            .sink { [weak self] follows in
-                self?.followRelationships = follows
-            }
-            .store(in: &cancellables)
+        // Relationship store removed - using MDK groups directly
 
         environment.reportStore.$reports
             .receive(on: RunLoop.main)
@@ -586,6 +580,7 @@ final class ParentZoneViewModel: ObservableObject {
     }
 
     private func unlock() {
+        print("🔓 ParentZone unlocking...")
         isUnlocked = true
         pinEntry = ""
         newPin = ""
@@ -602,9 +597,48 @@ final class ParentZoneViewModel: ObservableObject {
         refreshGroupSummaries()
         refreshRemoteShareStats()
         refreshParentKeyPackageIfNeeded()
+        print("🔄 Starting async refresh tasks...")
         Task {
+            await linkOrphanedGroups()
             await refreshPendingWelcomes()
+            await environment.syncCoordinator.refreshSubscriptions()
+            print("✅ Async refresh tasks completed")
         }
+    }
+    
+    private func linkOrphanedGroups() async {
+        print("🔗 Checking for orphaned groups (groups not linked to child profiles)...")
+        
+        // Get all groups from MDK
+        let groups: [Group]
+        do {
+            groups = try await environment.mdkActor.getGroups()
+            print("   Found \(groups.count) group(s) in MDK")
+        } catch {
+            print("   ❌ Failed to fetch groups: \(error.localizedDescription)")
+            return
+        }
+        
+        // Get all child profiles
+        await MainActor.run {
+            loadIdentities()
+        }
+        
+        for group in groups {
+            print("   Checking group: \(group.name) (ID: \(group.mlsGroupId.prefix(16))...)")
+            
+            // Check if any child is already linked to this group
+            let alreadyLinked = childIdentities.contains { $0.profile.mlsGroupId == group.mlsGroupId }
+            if alreadyLinked {
+                print("      ✅ Already linked to a child profile")
+                continue
+            }
+            
+            print("      ⚠️ Orphaned! Trying to link...")
+            await tryLinkGroupToChildProfile(groupId: group.mlsGroupId, groupName: group.name)
+        }
+        
+        print("✅ Orphaned group check completed")
     }
 
     private func refreshParentKeyPackageIfNeeded() {
@@ -728,11 +762,15 @@ final class ParentZoneViewModel: ObservableObject {
             parentIdentity = try environment.identityManager.parentIdentity()
             updateParentKeyCache(parentIdentity)
             let profiles = try environment.profileStore.fetchProfiles()
-            childIdentities = try profiles.map { profile in
-                let identity = try environment.identityManager.childIdentity(for: profile)
+            childIdentities = profiles.map { profile in
+                let identity = environment.identityManager.childIdentity(for: profile)
                 let metadata: ChildProfileModel?
                 if let identity {
-                    metadata = try environment.childProfileStore.profile(for: identity.publicKeyHex)
+                    do {
+                        metadata = try environment.childProfileStore.profile(for: identity.publicKeyHex)
+                    } catch {
+                        metadata = nil
+                    }
                 } else {
                     metadata = nil
                 }
@@ -756,24 +794,20 @@ final class ParentZoneViewModel: ObservableObject {
             let existingIDs = Set(childIdentities.map { $0.id })
             childSecretVisibility = childSecretVisibility.intersection(existingIDs)
             publishingChildIDs = publishingChildIDs.intersection(existingIDs)
-            Task {
-                await environment.syncCoordinator.refreshSubscriptions()
-            }
+            // Note: refreshSubscriptions is now called explicitly by callers when needed
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     func loadRelationships() {
-        environment.relationshipStore.refreshAll()
+        // Relationship store removed - using MDK groups directly
     }
 
     func refreshConnections() {
         Task {
             await environment.syncCoordinator.refreshSubscriptions()
-            await MainActor.run {
-                self.environment.relationshipStore.refreshAll()
-            }
+            // Relationship store removed - MDK groups refreshed via marmotStateDidChange
         }
     }
 
@@ -1029,10 +1063,24 @@ final class ParentZoneViewModel: ObservableObject {
             !packages.isEmpty,
             let normalizedParent = ParentIdentityKey(string: invite.parentPublicKey)?.hex.lowercased()
         else {
+            print("⚠️ storePendingKeyPackages: Missing packages or invalid parent key")
             return
+        }
+        
+        // Check if we already have these exact packages stored to avoid duplicates
+        if let existingPackages = pendingParentKeyPackages[normalizedParent],
+           existingPackages == packages {
+            // Already stored, skip
+            return
+        }
+        
+        print("📦 Storing \(packages.count) key package(s) for parent \(normalizedParent.prefix(16))...")
+        for (i, pkg) in packages.enumerated() {
+            print("   Package [\(i)] length: \(pkg.count) chars")
         }
         pendingParentKeyPackages[normalizedParent] = packages
         parentKeyPackageStore.save(packages: packages, forParentKey: normalizedParent)
+        print("✅ Key packages stored")
     }
 
     func hasPendingKeyPackages(for parentKey: String) -> Bool {
@@ -1052,22 +1100,81 @@ final class ParentZoneViewModel: ObservableObject {
         keyPackages: [String],
         normalizedParentKey: String
     ) async throws -> String {
-        try await ensureChildGroup(for: identity, preferredName: child.displayName)
-        guard
-            let refreshed = childIdentities.first(where: { $0.id == child.id }),
-            let groupId = refreshed.profile.mlsGroupId
-        else {
-            throw GroupMembershipWorkflowError.groupIdentifierMissing
+        print("🏗️ inviteParentToGroup: Checking if group exists...")
+        
+        // Check if group already exists
+        if let existingGroupId = identity.profile.mlsGroupId {
+            print("✅ Group already exists: \(existingGroupId.prefix(16))...")
+            print("📤 Adding \(keyPackages.count) member(s) to existing group...")
+            let relayOverride = await environment.relayDirectory.currentRelayURLs()
+            let request = GroupMembershipCoordinator.AddMembersRequest(
+                mlsGroupId: existingGroupId,
+                keyPackageEventsJson: keyPackages,
+                relayOverride: relayOverride
+            )
+            print("🚀 Calling groupMembershipCoordinator.addMembers...")
+            _ = try await environment.groupMembershipCoordinator.addMembers(request: request)
+            print("✅ Members added successfully")
+            
+            // Refresh the specific group summary
+            await refreshGroupSummariesAsync(mlsGroupId: existingGroupId)
+            
+            // Refresh subscriptions to include newly added members (this triggers notifications)
+            await environment.syncCoordinator.refreshSubscriptions()
+            
+            pendingParentKeyPackages.removeValue(forKey: normalizedParentKey)
+            parentKeyPackageStore.removePackages(forParentKey: normalizedParentKey)
+            return existingGroupId
         }
-        let relayOverride = await environment.relayDirectory.currentRelayURLs()
-        let request = GroupMembershipCoordinator.AddMembersRequest(
-            mlsGroupId: groupId,
-            keyPackageEventsJson: keyPackages,
-            relayOverride: relayOverride
+        
+        // Group doesn't exist - create it with both parents as members
+        print("🏗️ Creating new group with remote parent as initial member...")
+        let parentIdentity = try ensureParentIdentityLoaded()
+        let relays = await environment.relayDirectory.currentRelayURLs()
+        guard !relays.isEmpty else {
+            throw GroupMembershipWorkflowError.relaysUnavailable
+        }
+        let relayStrings = relays.map(\.absoluteString)
+        
+        // Create group with remote parent as the initial member (creator is added automatically)
+        let request = GroupMembershipCoordinator.CreateGroupRequest(
+            creatorPublicKeyHex: parentIdentity.publicKeyHex,
+            memberKeyPackageEventsJson: keyPackages,  // Remote parent as initial member
+            name: "\(child.displayName) Family",
+            description: "Secure sharing for \(child.displayName)",
+            relays: relayStrings,
+            adminPublicKeys: [parentIdentity.publicKeyHex],
+            relayOverride: relays
         )
-        _ = try await environment.groupMembershipCoordinator.addMembers(request: request)
+        print("🚀 Calling groupMembershipCoordinator.createGroup...")
+        let response = try await environment.groupMembershipCoordinator.createGroup(request: request)
+        let groupId = response.result.group.mlsGroupId
+        print("✅ Group created: \(groupId.prefix(16))...")
+        
+        print("💾 Updating ProfileStore with groupId...")
+        try environment.profileStore.updateGroupId(groupId, forProfileId: identity.profile.id)
+        print("✅ ProfileStore updated")
+        
+        // Update UI on main thread FIRST, before triggering notifications
+        print("🔄 Loading identities on MainActor...")
+        await MainActor.run {
+            loadIdentities()
+        }
+        print("✅ Identities loaded")
+        
+        // Refresh the specific group summary
+        print("🔄 Refreshing group summary for \(groupId.prefix(16))...")
+        await refreshGroupSummariesAsync(mlsGroupId: groupId)
+        print("✅ Group summary refreshed")
+        
+        // Refresh subscriptions to include new group members (this triggers notifications)
+        print("🔄 Refreshing subscriptions...")
+        await environment.syncCoordinator.refreshSubscriptions()
+        print("✅ Subscriptions refreshed")
+        
         pendingParentKeyPackages.removeValue(forKey: normalizedParentKey)
         parentKeyPackageStore.removePackages(forParentKey: normalizedParentKey)
+        print("🎉 inviteParentToGroup completed successfully")
         return groupId
     }
 
@@ -1081,23 +1188,8 @@ final class ParentZoneViewModel: ObservableObject {
         participantKeys: [String],
         mlsGroupId: String?
     ) throws {
-        let now = Date()
-        let message = FollowMessage(
-            followerChild: followerChild,
-            targetChild: targetChild,
-            approvedFrom: approvedFrom,
-            approvedTo: approvedTo,
-            status: status.rawValue,
-            by: actorKey,
-            timestamp: now
-        )
-        let updated = try environment.relationshipStore.upsertFollow(
-            message: message,
-            updatedAt: now,
-            participantKeys: participantKeys,
-            mlsGroupId: mlsGroupId
-        )
-        upsertFollow(updated)
+        // Follow relationships deprecated - using MDK groups directly
+        // This method is a no-op now
     }
 
     private func resolvedGroupId(for follow: FollowModel) -> String? {
@@ -1198,14 +1290,22 @@ final class ParentZoneViewModel: ObservableObject {
         }
 
         let normalizedRemoteParent = remoteParentKey.hex.lowercased()
+        print("🔍 Looking up key packages for parent: \(normalizedRemoteParent.prefix(16))...")
+        print("   Pending packages keys: \(Array(pendingParentKeyPackages.keys).map { $0.prefix(16) })")
         guard let keyPackages = pendingParentKeyPackages[normalizedRemoteParent], !keyPackages.isEmpty else {
             let message = GroupMembershipWorkflowError.keyPackageMissing.errorDescription ?? "Scan the other parent's Marmot invite before sending a request."
+            print("❌ Key packages not found!")
             errorMessage = message
             return message
+        }
+        print("✅ Found \(keyPackages.count) key package(s)")
+        for (i, pkg) in keyPackages.enumerated() {
+            print("   Package [\(i)] length: \(pkg.count)")
         }
 
         let groupId: String
         do {
+            print("🎯 Calling inviteParentToGroup...")
             groupId = try await inviteParentToGroup(
                 child: followerItem,
                 identity: followerIdentity,
@@ -1232,6 +1332,9 @@ final class ParentZoneViewModel: ObservableObject {
             errorMessage = nil
             loadIdentities()
             loadRelationships()
+            Task {
+                await environment.syncCoordinator.refreshSubscriptions()
+            }
             return nil
         } catch {
             logger.error("Failed to record follow after MDK invite: \(error.localizedDescription, privacy: .public)")
@@ -1304,6 +1407,9 @@ final class ParentZoneViewModel: ObservableObject {
             errorMessage = nil
             loadIdentities()
             loadRelationships()
+            Task {
+                await environment.syncCoordinator.refreshSubscriptions()
+            }
             return nil
         } catch {
             logger.error("Failed to record follow approval: \(error.localizedDescription, privacy: .public)")
@@ -1350,24 +1456,16 @@ final class ParentZoneViewModel: ObservableObject {
             return
         }
         do {
-            var identity = try environment.identityManager.createChildIdentity(
+            let identity = try environment.identityManager.createChildIdentity(
                 name: trimmed,
                 theme: theme,
                 avatarAsset: theme.defaultAvatarAsset
             )
-            if let delegation = identity.delegation {
-                delegationCache[identity.profile.id] = delegation
-            }
             loadIdentities()
             childSecretVisibility.insert(identity.profile.id)
             lastCreatedChildID = identity.profile.id
-            Task {
-                do {
-                    try await ensureChildGroup(for: identity, preferredName: trimmed)
-                } catch {
-                    self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                }
-            }
+            // Don't create group yet - MLS requires at least 2 members
+            // Group will be created when first follow is established
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -1534,7 +1632,7 @@ final class ParentZoneViewModel: ObservableObject {
                 self.isRefreshingPendingWelcomes = false
                 self.welcomeActionsInFlight.removeAll()
             }
-            environment.relationshipStore.refreshAll()
+            // Relationship store removed - MDK groups refreshed automatically
         }
     }
 
@@ -1570,25 +1668,32 @@ final class ParentZoneViewModel: ObservableObject {
         isRefreshingPendingWelcomes = true
         defer { isRefreshingPendingWelcomes = false }
         do {
+            print("🔍 Fetching pending welcomes from MDK...")
             let welcomes = try await welcomeClient.getPendingWelcomes()
+            print("✅ Found \(welcomes.count) pending welcome(s)")
+            for (i, welcome) in welcomes.enumerated() {
+                print("   Welcome [\(i)]: \(welcome.groupName) (ID: \(welcome.id.prefix(16))...)")
+            }
             pendingWelcomes = welcomes.map(PendingWelcomeItem.init)
+            print("✅ Updated pendingWelcomes @Published property")
         } catch {
+            print("❌ Failed to load pending welcomes: \(error.localizedDescription)")
             logger.error("Failed to load pending welcomes: \(error.localizedDescription, privacy: .public)")
             errorMessage = error.localizedDescription
         }
     }
 
-    func acceptWelcome(_ welcome: PendingWelcomeItem) async {
+    func acceptWelcome(_ welcome: PendingWelcomeItem, linkToChildId: UUID?) async {
         guard !welcomeActionsInFlight.contains(welcome.id) else { return }
         welcomeActionsInFlight.insert(welcome.id)
         defer { welcomeActionsInFlight.remove(welcome.id) }
         do {
-            try await welcomeClient.acceptWelcome(welcomeJson: welcome.welcome.eventJson)
+            try await welcomeClient.acceptWelcome(welcome: welcome.welcome)
             pendingWelcomes.removeAll { $0.id == welcome.id }
             refreshMarmotDiagnostics()
             notifyPendingWelcomeChange()
             notifyMarmotStateChange()
-            await handleAcceptedWelcome(welcome.welcome)
+            await handleAcceptedWelcome(welcome.welcome, linkToChildId: linkToChildId)
         } catch {
             logger.error("Failed to accept welcome: \(error.localizedDescription, privacy: .public)")
             errorMessage = error.localizedDescription
@@ -1600,7 +1705,7 @@ final class ParentZoneViewModel: ObservableObject {
         welcomeActionsInFlight.insert(welcome.id)
         defer { welcomeActionsInFlight.remove(welcome.id) }
         do {
-            try await welcomeClient.declineWelcome(welcomeJson: welcome.welcome.eventJson)
+            try await welcomeClient.declineWelcome(welcome: welcome.welcome)
             pendingWelcomes.removeAll { $0.id == welcome.id }
             refreshMarmotDiagnostics()
             notifyPendingWelcomeChange()
@@ -1615,9 +1720,89 @@ final class ParentZoneViewModel: ObservableObject {
         welcomeActionsInFlight.contains(welcome.id)
     }
 
-    private func handleAcceptedWelcome(_ welcome: Welcome) async {
+    private func handleAcceptedWelcome(_ welcome: Welcome, linkToChildId: UUID?) async {
+        print("🎉 handleAcceptedWelcome called for group: \(welcome.mlsGroupId.prefix(16))...")
+        print("   Group name: \(welcome.groupName)")
+        
         approvePendingFollows(for: welcome)
+        
+        // Link to specified child, or try auto-matching by name
+        if let childId = linkToChildId {
+            print("   🔗 Linking to explicitly selected child: \(childId)")
+            do {
+                try environment.profileStore.updateGroupId(welcome.mlsGroupId, forProfileId: childId)
+                print("   ✅ Linked group to child profile")
+            } catch {
+                print("   ❌ Failed to link: \(error.localizedDescription)")
+            }
+        } else {
+            print("   🔍 No child specified, trying auto-match by name...")
+            await tryLinkGroupToChildProfile(groupId: welcome.mlsGroupId, groupName: welcome.groupName)
+        }
+        
+        // Refresh subscriptions to include new group members
         await environment.syncCoordinator.refreshSubscriptions()
+        
+        // Reload identities to update profile associations
+        await MainActor.run {
+            loadIdentities()
+        }
+        
+        // Explicitly refresh group summaries for the new group
+        refreshGroupSummaries(mlsGroupId: welcome.mlsGroupId)
+    }
+    
+    private func tryLinkGroupToChildProfile(groupId: String, groupName: String) async {
+        print("🔗 Trying to link group \(groupId.prefix(16))... to child profile...")
+        print("   Group name: '\(groupName)'")
+        
+        // Strategy 1: Try to match by group name pattern "{ChildName} Family"
+        let trimmedName = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.hasSuffix(" Family") {
+            let childName = String(trimmedName.dropLast(" Family".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            print("   Extracted child name: '\(childName)'")
+            
+            // Find matching child by name
+            if let matchingChild = childIdentities.first(where: { $0.profile.name.caseInsensitiveCompare(childName) == .orderedSame }) {
+                print("   ✅ Found exact name match: \(matchingChild.displayName)")
+                
+                // Check if this child already has a group assigned
+                if matchingChild.profile.mlsGroupId != nil {
+                    print("   ⚠️ Child already has group ID: \(matchingChild.profile.mlsGroupId!.prefix(16))...")
+                    return
+                }
+                
+                // Update the ProfileStore to link this child to the group
+                do {
+                    try environment.profileStore.updateGroupId(groupId, forProfileId: matchingChild.id)
+                    print("   ✅ Linked child '\(matchingChild.displayName)' to group \(groupId.prefix(16))...")
+                    await MainActor.run {
+                        loadIdentities()
+                    }
+                    return
+                } catch {
+                    print("   ❌ Failed to update ProfileStore: \(error.localizedDescription)")
+                }
+            }
+        }
+        
+        // Strategy 2: If no name match, link to first child without a group
+        print("   🔍 No name match, looking for first unlinked child...")
+        if let unlinkedChild = childIdentities.first(where: { $0.profile.mlsGroupId == nil }) {
+            print("   ✅ Found unlinked child: \(unlinkedChild.displayName)")
+            do {
+                try environment.profileStore.updateGroupId(groupId, forProfileId: unlinkedChild.id)
+                print("   ✅ Auto-linked child '\(unlinkedChild.displayName)' to group \(groupId.prefix(16))...")
+                await MainActor.run {
+                    loadIdentities()
+                }
+            } catch {
+                print("   ❌ Failed to update ProfileStore: \(error.localizedDescription)")
+            }
+        } else {
+            print("   ⚠️ All children already have groups assigned")
+            print("   Available children: \(childIdentities.map { "\($0.profile.name) (group: \($0.profile.mlsGroupId?.prefix(8) ?? "none"))" })")
+        }
     }
 
     private func observeMarmotNotifications() {
@@ -1627,26 +1812,34 @@ final class ParentZoneViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.handlePendingWelcomeNotification()
+            Task { @MainActor [weak self] in
+                self?.handlePendingWelcomeNotification()
+            }
         }
         let stateObserver = center.addObserver(
             forName: .marmotStateDidChange,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.handleMarmotStateNotification()
+            Task { @MainActor [weak self] in
+                self?.handleMarmotStateNotification()
+            }
         }
         let messageObserver = center.addObserver(
             forName: .marmotMessagesDidChange,
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            self?.handleMarmotMessagesNotification(notification)
+            Task { @MainActor [weak self] in
+                self?.handleMarmotMessagesNotification(notification)
+            }
         }
         marmotObservers.append(contentsOf: [pendingObserver, stateObserver, messageObserver])
     }
 
     private func handlePendingWelcomeNotification() {
+        print("🔔 handlePendingWelcomeNotification called, isUnlocked=\(isUnlocked)")
+        // Always refresh - don't wait for user to unlock or visit the tab
         Task { [weak self] in
             await self?.refreshPendingWelcomes()
         }
@@ -1654,9 +1847,13 @@ final class ParentZoneViewModel: ObservableObject {
     }
 
     private func handleMarmotStateNotification() {
+        print("🔔 handleMarmotStateNotification called, isUnlocked=\(isUnlocked)")
+        // Always refresh state, even if not unlocked - keeps internal state current
         refreshMarmotDiagnostics()
         Task { [weak self] in
             await self?.refreshMembershipSurfaces()
+            // Also refresh pending welcomes since state change might mean new welcomes
+            await self?.refreshPendingWelcomes()
         }
         refreshGroupSummaries()
         refreshRemoteShareStats()
@@ -1679,35 +1876,51 @@ final class ParentZoneViewModel: ObservableObject {
 
     private func refreshGroupSummaries(mlsGroupId: String? = nil) {
         Task { [weak self] in
-            guard let self else { return }
-            do {
-                if let groupId = mlsGroupId {
-                    guard let group = try await self.environment.mdkActor.getGroup(mlsGroupId: groupId) else {
-                        await MainActor.run {
-                            self.groupSummaries.removeValue(forKey: groupId)
-                        }
-                        return
-                    }
-                    if let summary = await self.buildGroupSummary(group) {
-                        await MainActor.run {
-                            self.groupSummaries[groupId] = summary
-                        }
-                    }
-                } else {
-                    let groups = try await self.environment.mdkActor.getGroups()
-                    var summaries: [String: GroupSummary] = [:]
-                    for group in groups {
-                        if let summary = await self.buildGroupSummary(group) {
-                            summaries[group.mlsGroupId] = summary
-                        }
-                    }
+            await self?.refreshGroupSummariesAsync(mlsGroupId: mlsGroupId)
+        }
+    }
+    
+    private func refreshGroupSummariesAsync(mlsGroupId: String? = nil) async {
+        print("📊 refreshGroupSummariesAsync called for: \(mlsGroupId?.prefix(16) ?? "all groups")...")
+        do {
+            if let groupId = mlsGroupId {
+                print("   🔍 Fetching group from MDK...")
+                guard let group = try await self.environment.mdkActor.getGroup(mlsGroupId: groupId) else {
+                    print("   ⚠️ Group not found, removing from summaries")
                     await MainActor.run {
-                        self.groupSummaries = summaries
+                        self.groupSummaries.removeValue(forKey: groupId)
+                    }
+                    return
+                }
+                print("   ✅ Group fetched: \(group.name)")
+                print("   🔍 Building summary...")
+                if let summary = await self.buildGroupSummary(group) {
+                    print("   ✅ Summary built with \(summary.memberCount) members")
+                    print("   💾 Updating @Published groupSummaries on MainActor...")
+                    await MainActor.run {
+                        self.groupSummaries[groupId] = summary
+                        print("   ✅ @Published groupSummaries updated!")
                     }
                 }
-            } catch {
-                self.logger.error("Failed to refresh Marmot groups: \(error.localizedDescription, privacy: .public)")
+            } else {
+                print("   🔍 Fetching all groups from MDK...")
+                let groups = try await self.environment.mdkActor.getGroups()
+                print("   ✅ Found \(groups.count) group(s)")
+                var summaries: [String: GroupSummary] = [:]
+                for group in groups {
+                    if let summary = await self.buildGroupSummary(group) {
+                        summaries[group.mlsGroupId] = summary
+                    }
+                }
+                print("   💾 Updating @Published groupSummaries on MainActor...")
+                await MainActor.run {
+                    self.groupSummaries = summaries
+                    print("   ✅ @Published groupSummaries updated!")
+                }
             }
+        } catch {
+            print("   ❌ Error: \(error.localizedDescription)")
+            self.logger.error("Failed to refresh Marmot groups: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -1765,63 +1978,10 @@ final class ParentZoneViewModel: ObservableObject {
     }
 
     private func approvePendingFollows(for welcome: Welcome) {
-        guard let welcomerKey = ParentIdentityKey(string: welcome.welcomer)?.hex.lowercased() else {
-            logger.warning("Unable to normalize welcomer key for welcome \(welcome.id, privacy: .public)")
-            return
-        }
-
-        let pending = followRelationships.filter { follow in
-            !follow.approvedTo &&
-                follow.participantParentKeys.contains {
-                    $0.caseInsensitiveCompare(welcomerKey) == .orderedSame
-                }
-        }
-
-        guard !pending.isEmpty else {
-            logger.info("No pending follows matched Marmot welcome \(welcome.id, privacy: .public)")
-            return
-        }
-
-        let now = Date()
-        var updatedAny = false
-
-        for follow in pending {
-            guard
-                let followerHex = follow.followerChildHex(),
-                childKeyLookup[followerHex.lowercased()] != nil,
-                let targetHex = follow.targetChildHex()
-            else {
-                continue
-            }
-
-            let status: FollowModel.Status = follow.approvedFrom ? .active : .pending
-            let message = FollowMessage(
-                followerChild: followerHex,
-                targetChild: targetHex,
-                approvedFrom: follow.approvedFrom,
-                approvedTo: true,
-                status: status.rawValue,
-                by: welcomerKey,
-                timestamp: now
-            )
-
-            do {
-                let updated = try environment.relationshipStore.upsertFollow(
-                    message: message,
-                    updatedAt: now,
-                    participantKeys: [welcomerKey],
-                    mlsGroupId: welcome.mlsGroupId
-                )
-                upsertFollow(updated)
-                updatedAny = true
-            } catch {
-                logger.error("Failed to update follow for welcome \(welcome.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        }
-
-        if updatedAny {
-            loadRelationships()
-        }
+        // Follow relationships removed - group membership is tracked in MDK
+        // When a welcome is accepted, the user is automatically added to the group
+        // No need to update separate follow state
+        logger.info("Accepted welcome for group \(welcome.mlsGroupId, privacy: .public) - membership now in MDK")
     }
 
     private func notifyPendingWelcomeChange() {
@@ -1900,9 +2060,10 @@ final class ParentZoneViewModel: ObservableObject {
         )
         latestParentKeyPackage = keyPackage
 
+        // Creator is automatically added to the group, don't include in member list
         let request = GroupMembershipCoordinator.CreateGroupRequest(
             creatorPublicKeyHex: parentIdentity.publicKeyHex,
-            memberKeyPackageEventsJson: [keyPackage],
+            memberKeyPackageEventsJson: [],  // Empty - creator joins automatically
             name: "\(preferredName) Family",
             description: "Secure sharing for \(preferredName)",
             relays: relayStrings,
@@ -1910,9 +2071,19 @@ final class ParentZoneViewModel: ObservableObject {
             relayOverride: relays
         )
         let response = try await environment.groupMembershipCoordinator.createGroup(request: request)
-        try environment.profileStore.updateGroupId(response.result.group.mlsGroupId, forProfileId: identity.profile.id)
-        loadIdentities()
-        refreshGroupSummaries(mlsGroupId: response.result.group.mlsGroupId)
+        let groupId = response.result.group.mlsGroupId
+        try environment.profileStore.updateGroupId(groupId, forProfileId: identity.profile.id)
+        
+        // Update UI on main thread
+        await MainActor.run {
+            loadIdentities()
+        }
+        
+        // Refresh the specific group summary
+        await refreshGroupSummariesAsync(mlsGroupId: groupId)
+        
+        // Refresh subscriptions to include the new group
+        await environment.syncCoordinator.refreshSubscriptions()
     }
 
     private func createParentKeyPackage(
@@ -2180,7 +2351,7 @@ final class ParentZoneViewModel: ObservableObject {
     struct FollowInvite: Codable, Sendable, Equatable {
         let version: Int
         let childName: String?
-        let childPublicKey: String
+        let childPublicKey: String  // Now contains profile ID instead of pubkey
         let parentPublicKey: String
         let parentKeyPackages: [String]?
 
@@ -2204,7 +2375,7 @@ final class ParentZoneViewModel: ObservableObject {
             return """
             MyTube Follow Invite\(nameDescriptor)
             Parent: \(parentPublicKey)
-            Child: \(childPublicKey)
+            Profile: \(childPublicKey)
 
             Scan the QR or open the link below on the other parent's device:
             \(encodedURL ?? "")

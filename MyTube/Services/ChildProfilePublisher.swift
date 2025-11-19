@@ -53,64 +53,21 @@ actor ChildProfilePublisher {
         pictureURL: String? = nil,
         createdAt: Date = Date()
     ) async throws -> ChildProfileModel {
-        let resolvedIdentity: ChildIdentity
-        if let identity {
-            resolvedIdentity = identity
-        } else if let existing = try identityManager.childIdentity(for: profile) {
-            resolvedIdentity = existing
-        } else {
-            throw ChildProfilePublisherError.childIdentityMissing
-        }
-
-        var payload = ProfileMetadataPayload()
+        // Children no longer publish their own metadata
+        // Child profiles are just local data owned by the parent
+        // For now, just store locally without publishing to Nostr
+        
         let baseName = nameOverride ?? profile.name
-        payload.name = baseName
-        payload.displayName = displayNameOverride ?? baseName
-        payload.about = about
-        payload.picture = pictureURL
-
-        let contentData: Data
-        do {
-            contentData = try encoder.encode(payload)
-        } catch {
-            throw ChildProfilePublisherError.encodingFailed
-        }
-        guard let content = String(data: contentData, encoding: .utf8) else {
-            throw ChildProfilePublisherError.encodingFailed
-        }
-
-        let event = try signer.makeEvent(
-            kind: .metadata,
-            tags: [],
-            content: content,
-            keyPair: resolvedIdentity.keyPair,
-            createdAt: createdAt
-        )
-
-        let relays = await relayDirectory.currentRelayURLs()
-        guard !relays.isEmpty else {
-            throw ChildProfilePublisherError.relaysUnavailable
-        }
-
-        let connectedRelaySet = Set(
-            (await nostrClient.relayStatuses())
-                .filter { $0.status == .connected }
-                .map(\.url)
-        )
-        let targetRelays = relays.filter { connectedRelaySet.contains($0) }
-        guard !targetRelays.isEmpty else {
-            throw ChildProfilePublisherError.relaysUnavailable
-        }
-
-        try await publish(event: event, to: targetRelays)
-        logger.info("Published child metadata event \(event.idHex, privacy: .public)")
-
+        
+        // Use profile ID as a stable identifier instead of child pubkey
+        let profileIdentifier = profile.id.uuidString.lowercased()
+        
         return try childProfileStore.upsertProfile(
-            publicKey: resolvedIdentity.publicKeyHex.lowercased(),
-            name: payload.name,
-            displayName: payload.displayName,
-            about: payload.about,
-            pictureURLString: payload.picture,
+            publicKey: profileIdentifier,
+            name: baseName,
+            displayName: baseName,
+            about: about,
+            pictureURLString: pictureURL,
             updatedAt: createdAt
         )
     }

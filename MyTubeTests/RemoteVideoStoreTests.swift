@@ -60,7 +60,10 @@ final class RemoteVideoStoreTests: XCTestCase {
         XCTAssertEqual(summaryA.revokedCount, 1)
         XCTAssertEqual(summaryA.blockedCount, 0)
         XCTAssertEqual(summaryA.deletedCount, 0)
-        XCTAssertEqual(summaryA.lastSharedAt?.timeIntervalSince1970, now.timeIntervalSince1970, accuracy: 0.5)
+        guard let lastSharedAt = summaryA.lastSharedAt else {
+            return XCTFail("Expected lastSharedAt for owner A")
+        }
+        XCTAssertEqual(lastSharedAt.timeIntervalSince1970, now.timeIntervalSince1970, accuracy: 0.5)
 
         guard let summaryB = mapping[ownerB] else {
             return XCTFail("Expected summary for owner B")

@@ -152,15 +152,32 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
 
     private func updateSharedVideos() {
         guard let entities = remoteFetchedResultsController?.fetchedObjects else {
+            print("📺 updateSharedVideos: No remoteFetchedResultsController or no fetched objects")
             sharedSections = []
             remoteShareSummary = .empty
             return
         }
 
-        let items = entities.compactMap { entity -> SharedRemoteVideo? in
-            guard let model = RemoteVideoModel(entity: entity) else { return nil }
-            return makeSharedVideo(from: model)
+        print("📺 updateSharedVideos: Found \(entities.count) remote video entities")
+        
+        // Build display context asynchronously
+        Task { [weak self] in
+            guard let self, let environment = self.environment else { return }
+            let displayContext = await self.buildDisplayContext(environment: environment)
+            
+            await MainActor.run {
+                let items = entities.compactMap { entity -> SharedRemoteVideo? in
+                    guard let model = RemoteVideoModel(entity: entity) else { return nil }
+                    return self.makeSharedVideo(from: model, context: displayContext)
+                }
+                print("   Converted to \(items.count) SharedRemoteVideo items")
+                
+                self.processSharedVideoItems(items)
+            }
         }
+    }
+    
+    private func processSharedVideoItems(_ items: [SharedRemoteVideo]) {
 
         var availableCount = 0
         var downloadedCount = 0
@@ -199,17 +216,27 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             return lhsDate > rhsDate
         }
 
+        print("   Created \(sections.count) section(s)")
+        for section in sections {
+            print("      Section: \(section.ownerDisplayName) - \(section.videos.count) videos")
+        }
+        
         sharedSections = sections
         remoteShareSummary = RemoteShareSummary(
             availableCount: availableCount,
             downloadedCount: downloadedCount,
             lastSharedAt: latestShareDate
         )
+        
+        print("   📊 Summary: \(availableCount) available, \(downloadedCount) downloaded")
 
         if sections.isEmpty {
+            print("   ⚠️ No sections to display")
             presentedRemoteVideo = nil
             return
         }
+        print("   ✅ Shared sections updated!")
+
 
         if let presented = presentedRemoteVideo {
             let refreshed = sections.flatMap { $0.videos }.first { $0.video.id == presented.video.id }
@@ -221,25 +248,69 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func makeSharedVideo(from model: RemoteVideoModel) -> SharedRemoteVideo {
-        let display = resolveOwnerDisplay(for: model.ownerChild)
+    private struct DisplayContext {
+        let groupName: String?
+        let localProfileIds: Set<String>  // Local child profile IDs
+        let remoteParentNames: [String: String]  // Remote parent key -> display name
+    }
+    
+    private func buildDisplayContext(environment: AppEnvironment) async -> DisplayContext {
+        // Get group name if we're in exactly one group
+        var groupName: String?
+        do {
+            let groups = try await environment.mdkActor.getGroups()
+            if groups.count == 1, let group = groups.first {
+                groupName = group.name
+            }
+        } catch {
+            // Ignore
+        }
+        
+        // Get local child profile IDs (to identify if a video is from ourselves)
+        var localProfileIds: Set<String> = []
+        if let localProfiles = try? environment.profileStore.fetchProfiles() {
+            for profile in localProfiles {
+                // Profile ID as hex without dashes
+                let profileIdHex = profile.id.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+                localProfileIds.insert(profileIdHex)
+            }
+        }
+        
+        // Get remote parent names from published parent profiles
+        var remoteParentNames: [String: String] = [:]
+        // For now, we'll infer from the group - if not from us, show the group name
+        // Later we can enhance this to fetch parent profile metadata
+        
+        return DisplayContext(
+            groupName: groupName,
+            localProfileIds: localProfileIds,
+            remoteParentNames: remoteParentNames
+        )
+    }
+    
+    private func makeSharedVideo(from model: RemoteVideoModel, context: DisplayContext) -> SharedRemoteVideo {
+        let display = resolveOwnerDisplay(for: model, context: context)
         let canonical = canonicalOwnerKey(for: model.ownerChild) ?? model.ownerChild
         return SharedRemoteVideo(video: model, ownerDisplayName: display, ownerKey: canonical)
     }
 
-    private func resolveOwnerDisplay(for key: String) -> String {
-        if let environment {
-            do {
-                if let profile = try environment.childProfileStore.profile(for: key),
-                   let name = profile.bestName,
-                   !name.isEmpty {
-                    return name
-                }
-            } catch {
-                // Ignore and fall back to shortened key representation.
-            }
+    private func resolveOwnerDisplay(for model: RemoteVideoModel, context: DisplayContext) -> String {
+        // Strategy 1: Check if this is from ourselves
+        let ownerIdNormalized = model.ownerChild.lowercased()
+        if context.localProfileIds.contains(ownerIdNormalized) {
+            return "My Videos"  // This is from our own profile - shouldn't show in remote section
         }
-        return fallbackOwnerLabel(for: key)
+        
+        // Strategy 2: Videos from remote families
+        // Since we can't determine the exact remote child name (no Nostr keys),
+        // show it as being from the group/family
+        if let groupName = context.groupName {
+            // For single group, show "Friend's Family" or the group name
+            return "Shared from \(groupName)"
+        }
+        
+        // Strategy 3: Fallback for multi-group scenarios
+        return "Trusted Family"
     }
 
     private func fallbackOwnerLabel(for key: String) -> String {
@@ -285,11 +356,12 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             Task { [weak self, environment] in
                 do {
                     let updated = try await environment.remoteVideoDownloader.download(videoId: videoId, profileId: profileId)
+                    guard let self else { return }
+                    let displayContext = await self.buildDisplayContext(environment: environment)
                     await MainActor.run {
-                        if let shared = self?.makeSharedVideo(from: updated) {
-                            self?.presentedRemoteVideo = shared
-                        }
-                        self?.error = nil
+                        let shared = self.makeSharedVideo(from: updated, context: displayContext)
+                        self.presentedRemoteVideo = shared
+                        self.error = nil
                     }
                 } catch {
                     let description = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -313,11 +385,25 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
 
     func refresh() async {
         guard let environment else { return }
+        print("🔄 HomeFeed.refresh() called")
         error = nil
+        
+        // Refresh Marmot messages from MDK
+        print("   📬 Refreshing Marmot messages...")
+        await environment.marmotProjectionStore.refreshAll()
+        
+        // Refresh Nostr subscriptions
+        print("   📡 Refreshing subscriptions...")
         await environment.syncCoordinator.refreshSubscriptions()
-        environment.relationshipStore.refreshAll()
+        
+        // Relationship store removed - using MDK groups directly
+        print("   🎬 Recomputing ranking...")
         recomputeRanking()
+        
+        print("   📺 Updating shared videos...")
         updateSharedVideos()
+        
+        print("✅ HomeFeed.refresh() completed")
     }
 
     private var cancellables: Set<AnyCancellable> = []
@@ -361,11 +447,14 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
 }
 
 extension HomeFeedViewModel: NSFetchedResultsControllerDelegate {
-    func controllerDidChangeContent(_ controller: NSFetchedResultsController<NSFetchRequestResult>) {
-        if controller === fetchedResultsController {
-            recomputeRanking()
-        } else if controller === remoteFetchedResultsController {
-            updateSharedVideos()
+    nonisolated func controllerDidChangeContent(_ controller: NSFetchedResultsController<NSFetchRequestResult>) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if controller === self.fetchedResultsController {
+                self.recomputeRanking()
+            } else if controller === self.remoteFetchedResultsController {
+                self.updateSharedVideos()
+            }
         }
     }
 }

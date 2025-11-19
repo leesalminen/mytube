@@ -49,7 +49,7 @@ struct EncryptedMediaPayload: Sendable {
 }
 
 /// Provides helper utilities for XChaCha20-Poly1305 media encryption, key wrapping via X25519 + HKDF,
-/// and NIP-44 message handling.
+/// and NIP-59 gift-wrap envelope handling.
 final class CryptoEnvelopeService {
     private enum Constants {
         static let mediaAlgorithm = "xchacha20poly1305_v1"
@@ -196,7 +196,7 @@ final class CryptoEnvelopeService {
         return try ChaChaPoly.open(sealed, using: wrapKey)
     }
 
-    func encryptDirectMessage(
+    func encryptGiftWrapEnvelope(
         _ payload: Data,
         senderPrivateKeyData: Data,
         recipientPublicKeyXOnly: Data
@@ -211,7 +211,7 @@ final class CryptoEnvelopeService {
         return try nip44Encrypt(secretKey: senderSecretKey, publicKey: recipientPublicKey, content: plaintext, version: .v2)
     }
 
-    func decryptDirectMessage(
+    func decryptGiftWrapEnvelope(
         _ payload: String,
         recipientPrivateKeyData: Data,
         senderPublicKeyXOnly: Data

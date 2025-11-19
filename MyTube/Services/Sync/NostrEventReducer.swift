@@ -14,7 +14,6 @@ struct SyncReducerContext {
     let persistence: PersistenceController
     let keyStore: KeychainKeyStore
     let cryptoService: CryptoEnvelopeService
-    let relationshipStore: RelationshipStore
     let parentProfileStore: ParentProfileStore
     let childProfileStore: ChildProfileStore
     let likeStore: LikeStore
@@ -127,103 +126,8 @@ actor NostrEventReducer {
     }
 
     private func reduceFollowPointer(_ event: NostrEvent) async throws {
-        guard let identifier = event.tagValue(for: "d") else {
-            logger.warning("Follow pointer missing d tag")
-            return
-        }
-
-        let components = identifier.split(separator: ":")
-        let follower = components.dropFirst().first.map(String.init) ?? ""
-        let target = components.dropFirst(2).first.map(String.init) ?? ""
-
-        let pointerMessage: FollowMessage?
-        if let data = event.content().data(using: .utf8) {
-            pointerMessage = try? jsonDecoder.decode(FollowMessage.self, from: data)
-        } else {
-            pointerMessage = nil
-        }
-
-        let eventCreatedDate = event.createdDate
-
-        if let message = pointerMessage {
-            let messageDate = Date(timeIntervalSince1970: message.ts)
-            let followerCanonical = canonicalKey(message.followerChild)
-            let targetCanonical = canonicalKey(message.targetChild)
-
-            logger.debug(
-                """
-                Follow pointer message follower \(followerCanonical, privacy: .public) \
-                target \(targetCanonical, privacy: .public) approvedFrom \(message.approvedFrom) \
-                approvedTo \(message.approvedTo) status \(message.status, privacy: .public)
-                """
-            )
-
-            if let existing = try? context.relationshipStore.followRelationship(follower: followerCanonical, target: targetCanonical),
-               existing.updatedAt > messageDate {
-                return
-            }
-
-            let normalizedMessage = FollowMessage(
-                followerChild: message.followerChild,
-                targetChild: message.targetChild,
-                approvedFrom: message.approvedFrom,
-                approvedTo: message.approvedTo,
-                status: message.status,
-                by: message.by,
-                timestamp: messageDate
-            )
-
-            do {
-                _ = try context.relationshipStore.upsertFollow(
-                    message: normalizedMessage,
-                    updatedAt: messageDate,
-                    participantKeys: [message.by]
-                )
-            } catch {
-                logger.error("Failed to upsert follow from pointer message: \(error.localizedDescription, privacy: .public)")
-            }
-            return
-        }
-
-        let followerCanonical = canonicalKey(follower)
-        let targetCanonical = canonicalKey(target)
-
-        logger.debug(
-            """
-            Follow pointer event follower \(followerCanonical, privacy: .public) \
-            target \(targetCanonical, privacy: .public) pubkey \(event.pubkey, privacy: .public)
-            """
-        )
-
-        if followerCanonical.isEmpty || targetCanonical.isEmpty {
-            logger.warning("Follow pointer missing canonical keys")
-            return
-        }
-
-        if let existing = try? context.relationshipStore.followRelationship(follower: followerCanonical, target: targetCanonical),
-           existing.updatedAt >= eventCreatedDate {
-            return
-        }
-
-        let placeholderMessage = FollowMessage(
-            followerChild: followerCanonical,
-            targetChild: targetCanonical,
-            approvedFrom: false,
-            approvedTo: false,
-            status: FollowModel.Status.pending.rawValue,
-            by: event.pubkey,
-            timestamp: eventCreatedDate
-        )
-
-        do {
-            _ = try context.relationshipStore.upsertFollow(
-                message: placeholderMessage,
-                updatedAt: eventCreatedDate,
-                participantKeys: [event.pubkey]
-            )
-        } catch {
-            logger.error("Failed to upsert placeholder follow from pointer: \(error.localizedDescription, privacy: .public)")
-        }
+        // Follow pointers deprecated - using MDK groups directly
+        logger.debug("Skipping follow pointer event \(event.idHex, privacy: .public) - follows removed")
     }
 
     private func reduceVideoTombstone(_ event: NostrEvent) async throws {

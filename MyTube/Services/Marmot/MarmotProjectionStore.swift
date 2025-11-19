@@ -55,7 +55,131 @@ actor MarmotProjectionStore {
         self.decoder = decoder
 
         self.lastProcessedByGroup = Self.loadCursor(from: userDefaults)
+    }
 
+    deinit {
+        if let stateObserver {
+            notificationCenter.removeObserver(stateObserver)
+        }
+        if let messageObserver {
+            notificationCenter.removeObserver(messageObserver)
+        }
+    }
+
+    func start() {
+        installObserversIfNeeded()
+        Task { await refreshAll() }
+        
+        // Start periodic polling for new messages every 10 seconds
+        // This ensures we catch messages even if notifications don't fire
+        Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
+                await refreshAll()
+            }
+        }
+    }
+
+    func refreshAll() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        defer { isRefreshing = false }
+
+        logger.info("🔄 MarmotProjectionStore.refreshAll starting...")
+        let groups: [Group]
+        do {
+            groups = try await mdkActor.getGroups()
+            logger.info("   Found \(groups.count) group(s) to refresh")
+        } catch {
+            logger.error("Failed to load MDK groups: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        for group in groups {
+            logger.info("   Refreshing group: \(group.name) (\(group.mlsGroupId.prefix(16))...)")
+            await refreshGroupInternal(groupId: group.mlsGroupId)
+        }
+        logger.info("✅ MarmotProjectionStore.refreshAll completed")
+    }
+
+    func refreshGroup(mlsGroupId: String) async {
+        await refreshGroupInternal(groupId: mlsGroupId)
+    }
+
+    private func refreshGroupInternal(groupId: String) async {
+        logger.debug("      📬 Fetching messages from MDK for group \(groupId.prefix(16))...")
+        let messages: [Message]
+        do {
+            messages = try await mdkActor.getMessages(inGroup: groupId)
+            logger.info("      Found \(messages.count) total message(s) in MDK")
+        } catch {
+            logger.error("Failed to load MDK messages for \(groupId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        guard !messages.isEmpty else { 
+            logger.debug("      No messages to process")
+            return 
+        }
+        let lastCursor = lastProcessedByGroup[groupId] ?? 0
+        let newMessages = messages
+            .filter { $0.processedAt > lastCursor }
+            .sorted { $0.processedAt < $1.processedAt }
+        logger.info("      Found \(newMessages.count) NEW message(s) to project (cursor: \(lastCursor))")
+        guard !newMessages.isEmpty else { return }
+
+        for message in newMessages {
+            logger.debug("         Projecting message: \(message.eventId.prefix(16))... state=\(message.state)")
+            do {
+                try await project(message: message)
+                lastProcessedByGroup[groupId] = message.processedAt
+                logger.debug("         ✅ Projected successfully")
+            } catch {
+                logger.error("Projection failed for event \(message.eventId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        persistCursor()
+    }
+
+    private func project(message: Message) async throws {
+        // Marmot messages are unsigned rumors, so we need to parse the JSON directly
+        guard let eventData = message.eventJson.data(using: .utf8),
+              let eventObj = try? JSONSerialization.jsonObject(with: eventData) as? [String: Any],
+              let kind = eventObj["kind"] as? UInt16,
+              let content = eventObj["content"] as? String else {
+            logger.error("Failed to parse Marmot event JSON")
+            return
+        }
+
+        let processedDate = Date(timeIntervalSince1970: TimeInterval(message.processedAt))
+        let kindValue = kind
+
+        guard let messageKind = MarmotMessageKind(rawValue: kindValue) else {
+            logger.debug("Ignoring unsupported Marmot message kind \(kindValue)")
+            return
+        }
+
+        switch messageKind {
+        case .follow:
+            logger.debug("Received follow message in projection store - handled by ParentZoneViewModel")
+            // Follow messages are handled by ParentZoneViewModel.processFollowMessagesInGroup
+            // We just log and skip here to avoid duplicate processing
+        case .videoShare:
+            try projectShare(content: content, processedAt: processedDate)
+        case .videoRevoke:
+            try projectLifecycle(content: content, status: .revoked, processedAt: processedDate)
+        case .videoDelete:
+            try projectLifecycle(content: content, status: .deleted, processedAt: processedDate)
+        case .like:
+            try await projectLike(content: content)
+        case .report:
+            try await projectReport(content: content, processedAt: processedDate)
+        }
+    }
+
+    private func installObserversIfNeeded() {
+        guard stateObserver == nil, messageObserver == nil else { return }
         stateObserver = notificationCenter.addObserver(
             forName: .marmotStateDidChange,
             object: nil,
@@ -74,124 +198,32 @@ actor MarmotProjectionStore {
         }
     }
 
-    deinit {
-        if let stateObserver {
-            notificationCenter.removeObserver(stateObserver)
-        }
-        if let messageObserver {
-            notificationCenter.removeObserver(messageObserver)
-        }
-    }
-
-    func start() {
-        Task {
-            await refreshAll()
-        }
-    }
-
-    func refreshAll() async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
-
-        let groups: [Group]
-        do {
-            groups = try await mdkActor.getGroups()
-        } catch {
-            logger.error("Failed to load MDK groups: \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        for group in groups {
-            await refreshGroupInternal(groupId: group.mlsGroupId)
-        }
-    }
-
-    func refreshGroup(mlsGroupId: String) async {
-        await refreshGroupInternal(groupId: mlsGroupId)
-    }
-
-    private func refreshGroupInternal(groupId: String) async {
-        let messages: [Message]
-        do {
-            messages = try await mdkActor.getMessages(inGroup: groupId)
-        } catch {
-            logger.error("Failed to load MDK messages for \(groupId, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        guard !messages.isEmpty else { return }
-        let lastCursor = lastProcessedByGroup[groupId] ?? 0
-        let newMessages = messages
-            .filter { $0.processedAt > lastCursor }
-            .sorted { $0.processedAt < $1.processedAt }
-        guard !newMessages.isEmpty else { return }
-
-        for message in newMessages {
-            do {
-                try await project(message: message)
-                lastProcessedByGroup[groupId] = message.processedAt
-            } catch {
-                logger.error("Projection failed for event \(message.eventId, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
-        }
-
-        persistCursor()
-    }
-
-    private func project(message: Message) async throws {
-        let event: NostrEvent
-        do {
-            event = try NostrEvent.fromJson(json: message.eventJson)
-        } catch {
-            logger.error("Failed to decode Marmot event JSON: \(error.localizedDescription, privacy: .public)")
-            return
-        }
-
-        let processedDate = Date(timeIntervalSince1970: TimeInterval(message.processedAt))
-        let kindValue = event.kind().asU16()
-
-        guard let messageKind = MarmotMessageKind(rawValue: kindValue) else {
-            logger.debug("Ignoring unsupported Marmot message kind \(kindValue)")
-            return
-        }
-
-        switch messageKind {
-        case .videoShare:
-            try projectShare(event: event, processedAt: processedDate)
-        case .videoRevoke:
-            try projectLifecycle(event: event, status: .revoked, processedAt: processedDate)
-        case .videoDelete:
-            try projectLifecycle(event: event, status: .deleted, processedAt: processedDate)
-        case .like:
-            try await projectLike(event: event)
-        case .report:
-            try await projectReport(event: event, processedAt: processedDate)
-        }
-    }
-
-    private func projectShare(event: NostrEvent, processedAt: Date) throws {
-        guard let metadataJSON = event.content().data(using: .utf8) else {
+    private func projectShare(content: String, processedAt: Date) throws {
+        logger.info("         📹 Projecting video share...")
+        guard let metadataJSON = content.data(using: .utf8) else {
             throw ProjectionError.invalidPayload
         }
 
         let message = try decoder.decode(VideoShareMessage.self, from: metadataJSON)
+        logger.info("            Video ID: \(message.videoId)")
+        logger.info("            Owner: \(message.ownerChild.prefix(16))...")
         guard let metadataString = String(data: metadataJSON, encoding: .utf8) else {
             throw ProjectionError.invalidPayload
         }
-        _ = try remoteVideoStore.upsertRemoteVideoShare(
+        let model = try remoteVideoStore.upsertRemoteVideoShare(
             message: message,
             metadataJSON: metadataString,
             receivedAt: processedAt
         )
+        logger.info("         ✅ Video share projected to RemoteVideoStore: \(model.id)")
     }
 
     private func projectLifecycle(
-        event: NostrEvent,
+        content: String,
         status: RemoteVideoModel.Status,
         processedAt: Date
     ) throws {
-        guard let data = event.content().data(using: .utf8) else {
+        guard let data = content.data(using: .utf8) else {
             throw ProjectionError.invalidPayload
         }
         let message = try decoder.decode(VideoLifecycleMessage.self, from: data)
@@ -204,16 +236,16 @@ actor MarmotProjectionStore {
         )
     }
 
-    private func projectLike(event: NostrEvent) async throws {
-        guard let data = event.content().data(using: .utf8) else {
+    private func projectLike(content: String) async throws {
+        guard let data = content.data(using: .utf8) else {
             throw ProjectionError.invalidPayload
         }
         let message = try decoder.decode(LikeMessage.self, from: data)
         await likeStore.processIncomingLike(message)
     }
 
-    private func projectReport(event: NostrEvent, processedAt: Date) async throws {
-        guard let data = event.content().data(using: .utf8) else {
+    private func projectReport(content: String, processedAt: Date) async throws {
+        guard let data = content.data(using: .utf8) else {
             throw ProjectionError.invalidPayload
         }
         let message = try decoder.decode(ReportMessage.self, from: data)
