@@ -10,7 +10,6 @@ import SwiftUI
 @main
 struct MyTubeApp: App {
     @StateObject private var environment = AppEnvironment.live()
-    @State private var pendingDeepLink: URL?
 
     var body: some Scene {
         WindowGroup {
@@ -28,7 +27,7 @@ struct MyTubeApp: App {
         guard url.scheme == "tubestr" || url.scheme == "mytube" else { return }
         
         // Store the URL and trigger navigation to Parent Zone
-        pendingDeepLink = url
+        environment.pendingDeepLink = url
         
         // The URL will be handled by ParentZoneView when it appears
         // We could add a more sophisticated routing mechanism here if needed

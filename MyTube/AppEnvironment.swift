@@ -57,6 +57,7 @@ final class AppEnvironment: ObservableObject {
 
     @Published var onboardingState: OnboardingState
     @Published var storageModeSelection: StorageModeSelection
+    @Published var pendingDeepLink: URL?
 
     let mainQueue = DispatchQueue.main
     let backgroundQueue = DispatchQueue(label: "com.mytube.background", qos: .userInitiated)

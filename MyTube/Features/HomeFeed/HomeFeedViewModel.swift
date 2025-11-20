@@ -38,6 +38,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     private var remoteFetchedResultsController: NSFetchedResultsController<RemoteVideoEntity>?
     private var keepAliveTask: Task<Void, Never>?
     private let keepAliveInterval: UInt64 = 60 * NSEC_PER_SEC
+    private var marmotObservers: [NSObjectProtocol] = []
     private let metadataDecoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
@@ -56,6 +57,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
         updateProfile(environment.activeProfile)
+        installMarmotObservers()
 
         Task {
             await environment.syncCoordinator.start()
@@ -533,6 +535,9 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
 
     deinit {
         keepAliveTask?.cancel()
+        for observer in marmotObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     private func startKeepAlive(using environment: AppEnvironment) {
@@ -549,6 +554,25 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func installMarmotObservers() {
+        let center = NotificationCenter.default
+        let stateObserver = center.addObserver(
+            forName: .marmotStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateSharedVideos()
+        }
+        let messagesObserver = center.addObserver(
+            forName: .marmotMessagesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateSharedVideos()
+        }
+        marmotObservers.append(contentsOf: [stateObserver, messagesObserver])
     }
 
     struct SharedRemoteSection: Identifiable {

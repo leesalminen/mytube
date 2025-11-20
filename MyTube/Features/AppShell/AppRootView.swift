@@ -9,7 +9,7 @@ import SwiftUI
 
 struct AppRootView: View {
     @EnvironmentObject private var appEnvironment: AppEnvironment
-    @State private var selection: Route? = .home
+    @State private var selection: Route?
 
     var body: some View {
         Group {
@@ -20,7 +20,25 @@ struct AppRootView: View {
                 NavigationSplitView {
                     SidebarView(selection: $selection)
                 } detail: {
-                    detailView(for: selection ?? .home)
+                    if let selection {
+                        detailView(for: selection)
+                    } else {
+                        Color.clear
+                    }
+                }
+                .onAppear {
+                    if selection == nil {
+                        if !appEnvironment.parentAuth.isPinConfigured() {
+                            selection = .parentZone
+                        } else {
+                            selection = .home
+                        }
+                    }
+                }
+                .onChange(of: appEnvironment.pendingDeepLink) { newValue in
+                    if newValue != nil {
+                        selection = .parentZone
+                    }
                 }
             }
         }

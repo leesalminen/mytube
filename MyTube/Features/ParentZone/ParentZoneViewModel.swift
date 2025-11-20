@@ -6,6 +6,7 @@
 //
 
 import Combine
+import CoreData
 import Foundation
 import MDKBindings
 import NostrSDK
@@ -138,6 +139,7 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var requiresVideoApproval: Bool = false
     @Published var enableContentScanning: Bool = true
     @Published var pendingApprovalVideos: [VideoModel] = []
+    @Published var pendingFollowInviteData: String?
 
     private let environment: AppEnvironment
     private let parentAuth: ParentAuth
@@ -195,13 +197,34 @@ final class ParentZoneViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        Publishers.CombineLatest($isUnlocked, environment.$pendingDeepLink)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] unlocked, deepLink in
+                guard let self, unlocked, let deepLink else { return }
+                self.handleDeepLink(deepLink)
+            }
+            .store(in: &cancellables)
+
         observeMarmotNotifications()
+        observeParentProfileChanges()
         loadParentalControls()
     }
 
     deinit {
         for observer in marmotObservers {
             NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme == "tubestr" else { return }
+
+        // Clear the pending link so we don't process it again
+        environment.pendingDeepLink = nil
+
+        if url.host == "follow-invite" {
+            // Pass the full URL string so FollowInvite.decode can parse it correctly via decodeURLString
+            self.pendingFollowInviteData = url.absoluteString
         }
     }
 
@@ -691,7 +714,11 @@ final class ParentZoneViewModel: ObservableObject {
             }
             
             print("      ⚠️ Orphaned! Trying to link...")
-            await tryLinkGroupToChildProfile(groupId: group.mlsGroupId, groupName: group.name)
+            await tryLinkGroupToChildProfile(
+                groupId: group.mlsGroupId,
+                groupName: group.name,
+                groupDescription: group.description
+            )
         }
         
         print("✅ Orphaned group check completed")
@@ -1825,7 +1852,11 @@ final class ParentZoneViewModel: ObservableObject {
             }
         } else {
             print("   🔍 No child specified, trying auto-match by name...")
-            await tryLinkGroupToChildProfile(groupId: welcome.mlsGroupId, groupName: welcome.groupName)
+            await tryLinkGroupToChildProfile(
+                groupId: welcome.mlsGroupId,
+                groupName: welcome.groupName,
+                groupDescription: welcome.groupDescription
+            )
         }
         
         // Refresh subscriptions to include new group members
@@ -1857,37 +1888,55 @@ final class ParentZoneViewModel: ObservableObject {
         GroupNameFormatter.parentDisplayName(for: key, store: environment.parentProfileStore)
     }
     
-    private func tryLinkGroupToChildProfile(groupId: String, groupName: String) async {
+    private func tryLinkGroupToChildProfile(
+        groupId: String,
+        groupName: String,
+        groupDescription: String? = nil
+    ) async {
         print("🔗 Trying to link group \(groupId.prefix(16))... to child profile...")
         print("   Group name: '\(groupName)'")
+        if let groupDescription {
+            print("   Group description: '\(groupDescription)'")
+        }
         
-        // Strategy 1: Try to match by group name pattern "{ChildName} Family"
+        // Strategy 1: Try to match by explicit child name hints (group name or description)
+        var candidateNames: [String] = []
         let trimmedName = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedName.hasSuffix(" Family") {
             let childName = String(trimmedName.dropLast(" Family".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            print("   Extracted child name: '\(childName)'")
+            if !childName.isEmpty {
+                candidateNames.append(childName)
+            }
+        }
+        if let description = groupDescription?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty {
+            let lower = description.lowercased()
+            let prefix = "secure sharing for "
+            if let range = lower.range(of: prefix) {
+                let namePart = lower[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !namePart.isEmpty {
+                    candidateNames.append(namePart)
+                }
+            }
+        }
+
+        if let matchName = candidateNames.first,
+           let matchingChild = childIdentities.first(where: { $0.profile.name.lowercased() == matchName.lowercased() }) {
+            print("   ✅ Found name match: \(matchingChild.displayName)")
             
-            // Find matching child by name
-            if let matchingChild = childIdentities.first(where: { $0.profile.name.caseInsensitiveCompare(childName) == .orderedSame }) {
-                print("   ✅ Found exact name match: \(matchingChild.displayName)")
-                
-                // Check if this child already has a group assigned
-                if matchingChild.profile.mlsGroupId != nil {
-                    print("   ⚠️ Child already has group ID: \(matchingChild.profile.mlsGroupId!.prefix(16))...")
-                    return
+            if matchingChild.profile.mlsGroupId != nil {
+                print("   ⚠️ Child already has group ID: \(matchingChild.profile.mlsGroupId!.prefix(16))...")
+                return
+            }
+            
+            do {
+                try environment.profileStore.updateGroupId(groupId, forProfileId: matchingChild.id)
+                print("   ✅ Linked child '\(matchingChild.displayName)' to group \(groupId.prefix(16))...")
+                await MainActor.run {
+                    loadIdentities()
                 }
-                
-                // Update the ProfileStore to link this child to the group
-                do {
-                    try environment.profileStore.updateGroupId(groupId, forProfileId: matchingChild.id)
-                    print("   ✅ Linked child '\(matchingChild.displayName)' to group \(groupId.prefix(16))...")
-                    await MainActor.run {
-                        loadIdentities()
-                    }
-                    return
-                } catch {
-                    print("   ❌ Failed to update ProfileStore: \(error.localizedDescription)")
-                }
+                return
+            } catch {
+                print("   ❌ Failed to update ProfileStore: \(error.localizedDescription)")
             }
         }
         
@@ -1940,6 +1989,27 @@ final class ParentZoneViewModel: ObservableObject {
             }
         }
         marmotObservers.append(contentsOf: [pendingObserver, stateObserver, messageObserver])
+    }
+
+    private func observeParentProfileChanges() {
+        let observer = NotificationCenter.default.addObserver(
+            forName: .NSManagedObjectContextDidSave,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self else { return }
+            guard let inserted = notification.userInfo?[NSInsertedObjectsKey] as? Set<NSManagedObject>,
+                  let updated = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> else {
+                return
+            }
+            let changedProfiles = inserted.union(updated).contains { object in
+                object.entity.name == "ParentProfileEntity"
+            }
+            if changedProfiles {
+                Task { await self.refreshGroupSummariesAsync() }
+            }
+        }
+        marmotObservers.append(observer)
     }
 
     private func handlePendingWelcomeNotification() {

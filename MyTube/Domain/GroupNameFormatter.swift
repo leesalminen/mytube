@@ -41,7 +41,15 @@ struct GroupNameFormatter {
         var remoteNames: [String] = []
         var remoteFallbacks: [String] = []
 
-        for member in members {
+        // Prefer member list; fall back to admin pubkeys so we always have a key for labeling
+        let remoteCandidates: [String] = {
+            if members.isEmpty {
+                return group.adminPubkeys
+            }
+            return members
+        }()
+
+        for member in remoteCandidates {
             let canonical = canonicalParentKey(member)
             if let localCanonical, canonical == localCanonical { continue }
 
@@ -63,10 +71,14 @@ struct GroupNameFormatter {
 
         let raw = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if !raw.isEmpty {
-            if raw.contains("Friend's Family"), let fallback = remoteFallbacks.first {
+            if raw.localizedCaseInsensitiveContains("friend's family"), let fallback = remoteFallbacks.first {
                 return "\(localName) & \(fallback)'s Family"
             }
             return raw
+        }
+
+        if let fallback = remoteFallbacks.first {
+            return "\(localName) & \(fallback)'s Family"
         }
 
         return "\(localName)'s Family"

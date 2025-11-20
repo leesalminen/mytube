@@ -22,7 +22,6 @@ struct ParentZoneView: View {
     @State private var importChildName = ""
     @State private var importChildSecret = ""
     @State private var importChildTheme: ThemeDescriptor = .ocean
-    @State private var qrIntent: QRIntent?
     @State private var sharePromptVideo: VideoModel?
     @State private var shareRecipient: String = ""
     @State private var shareStatusMessage: String?
@@ -44,7 +43,7 @@ struct ParentZoneView: View {
     @State private var isPublishingParentProfile = false
     @State private var selectedSection: ParentZoneSection = .overview
     @State private var expandedChildIDs: Set<UUID> = []
-    @State private var familyViewSelection: FamilyViewSelection = .parent
+    @State private var familyViewSelection: FamilyViewSelection = .children
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -163,16 +162,6 @@ struct ParentZoneView: View {
                 ShareSheet(activityItems: sharePayload)
             }
         }
-        .sheet(item: $qrIntent) { intent in
-            QRScannerSheet(
-                title: intent.title,
-                onResult: { value in
-                    handleScanResult(value, for: intent)
-                    qrIntent = nil
-                },
-                onCancel: { qrIntent = nil }
-            )
-        }
         .sheet(isPresented: $isAddingChild) {
             ChildProfileFormSheet(
                 title: "Add Child Profile",
@@ -190,7 +179,6 @@ struct ParentZoneView: View {
                 name: $importChildName,
                 secret: $importChildSecret,
                 theme: $importChildTheme,
-                onScan: { qrIntent = .importChild },
                 onCancel: resetChildImportState,
                 onImport: {
                     viewModel.importChildProfile(
@@ -223,7 +211,7 @@ struct ParentZoneView: View {
 
                     Section("Connect using an invite") {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Paste the Marmot invite link or scan the QR from the other parent. We auto-fill both keys and keep their Marmot key package so approval works in one step.")
+                            Text("Paste the Marmot invite link from the other parent. We auto-fill both keys and keep their Marmot key package so approval works in one step.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -239,15 +227,6 @@ struct ParentZoneView: View {
                                     pasteFollowInviteFromClipboard()
                                 } label: {
                                     Label("Paste", systemImage: "doc.on.clipboard")
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(followIsSubmitting)
-
-                                Button {
-                                    qrIntent = .followParent
-                                } label: {
-                                    Label("Scan invite", systemImage: "qrcode.viewfinder")
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
@@ -378,23 +357,11 @@ struct ParentZoneView: View {
             NavigationStack {
                 Form {
                     Section("Recipient") {
-                        HStack {
-                            TextField("npub1… or hex", text: $shareRecipient)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .font(.system(.footnote).monospaced())
-                                .disabled(shareIsSending)
-                            Button {
-                                qrIntent = .shareParent
-                            } label: {
-                                Label("Scan parent key", systemImage: "qrcode.viewfinder")
-                                    .labelStyle(.iconOnly)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
+                        TextField("npub1… or hex", text: $shareRecipient)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(.footnote).monospaced())
                             .disabled(shareIsSending)
-                            .accessibilityLabel("Scan recipient parent key QR")
-                        }
                         Text("The other parent must accept your Marmot invite before their kids can watch new shares.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -482,6 +449,19 @@ struct ParentZoneView: View {
         .onChange(of: viewModel.parentProfile) { profile in
             syncParentProfileFields(with: profile)
         }
+        .onChange(of: viewModel.pendingFollowInviteData) { data in
+            if let data {
+                self.followInviteInput = data
+                self.isRequestingFollow = true
+                viewModel.pendingFollowInviteData = nil
+                
+                // Trigger parsing immediately since the binding update won't fire onChange(of: followInviteInput)
+                // until the next runloop, and we want the Connect button enabled immediately.
+                Task { @MainActor in
+                    self.parseFollowInviteInput()
+                }
+            }
+        }
     }
 
     private var unlockedView: some View {
@@ -538,25 +518,20 @@ struct ParentZoneView: View {
                     }
                 } else {
                     PinCard(icon: "lock.fill", title: "Unlock Parent Tools", subtitle: "Enter your PIN or authenticate with Face ID.") {
-                        PinSecureField(title: "Parent PIN", placeholder: "Enter PIN", text: $viewModel.pinEntry)
-                        VStack(spacing: 12) {
-                            Button {
-                                viewModel.authenticate()
-                            } label: {
-                                Text("Unlock")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(KidPrimaryButtonStyle())
-                            .controlSize(.large)
+                        PinDots(pinLength: viewModel.pinEntry.count)
+                            .padding(.vertical, 12)
+                            .frame(maxWidth: .infinity)
 
-                            Button {
-                                viewModel.unlockWithBiometrics()
-                            } label: {
-                                Label("Unlock with Face ID", systemImage: "faceid")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.bordered)
+                        PinKeypad(onInput: handlePinInput)
+
+                        Button {
+                            viewModel.unlockWithBiometrics()
+                        } label: {
+                            Label("Unlock with Face ID", systemImage: "faceid")
+                                .frame(maxWidth: .infinity)
                         }
+                        .buttonStyle(.bordered)
+                        .padding(.top, 12)
                     }
                 }
 
@@ -1811,17 +1786,9 @@ private extension ParentZoneView {
 
             if role == .incoming {
                 if needsKeyPackages {
-                    Text("Scan the other parent's Marmot invite to capture their key packages before approving.")
+                    Text("Paste the other parent's Marmot invite link in the Marmot Invite sheet before approving so we can capture their key packages.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Button {
-                        qrIntent = .followParent
-                    } label: {
-                        Label("Scan Invite", systemImage: "qrcode.viewfinder")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
 
                 if approvingFollowID == follow.id {
@@ -1900,50 +1867,6 @@ private extension ParentZoneView {
     private func relativeDateString(for date: Date?) -> String? {
         guard let date else { return nil }
         return ParentZoneView.relativeFormatter.localizedString(for: date, relativeTo: Date())
-    }
-
-    func handleScanResult(_ rawValue: String, for intent: QRIntent) {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        if let invite = ParentZoneViewModel.ChildDeviceInvite.decode(from: trimmed) {
-            applyChildInvite(invite, for: intent)
-            return
-        }
-
-        if (intent == .followChild || intent == .followParent),
-           let followInvite = ParentZoneViewModel.FollowInvite.decode(from: trimmed) {
-            applyFollowInvite(followInvite, rawValue: trimmed)
-            return
-        }
-
-        switch intent {
-        case .importChild:
-            importChildSecret = trimmed
-
-        case .followChild:
-            let candidate = normalizedScannedKey(trimmed, validator: viewModel.isValidParentKey)
-            followTargetChildKey = candidate
-            followFormError = nil
-
-        case .followParent:
-            let candidate = normalizedScannedKey(trimmed, validator: viewModel.isValidParentKey)
-            followTargetParentKey = candidate
-            followSelectedParentKey = matchingParentOption(for: candidate, in: followParentOptions)
-            followFormError = nil
-
-        case .shareParent:
-            let candidate = normalizedScannedKey(trimmed, validator: viewModel.isValidParentKey)
-            if let match = matchingParentOption(for: candidate, in: shareParentOptions) {
-                shareRecipient = match
-                shareSelectedParentKey = match
-            } else {
-                shareRecipient = candidate
-                shareSelectedParentKey = nil
-            }
-            shareStatusMessage = nil
-            shareStatusIsError = false
-        }
     }
 
     @ViewBuilder
@@ -2025,49 +1948,6 @@ private extension ParentZoneView {
         .padding(.vertical, 4)
     }
 
-    func applyChildInvite(_ invite: ParentZoneViewModel.ChildDeviceInvite, for intent: QRIntent) {
-        switch intent {
-        case .importChild:
-            importChildSecret = invite.childSecretKey
-            if importChildName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                importChildName = invite.childName
-            }
-
-        case .followChild:
-            applyFollowInvite(
-                ParentZoneViewModel.FollowInvite(
-                    version: invite.version,
-                    childName: invite.childName,
-                    childPublicKey: invite.childPublicKey,
-                    parentPublicKey: invite.parentPublicKey,
-                    parentKeyPackages: nil
-                )
-            )
-
-        case .followParent:
-            applyFollowInvite(
-                ParentZoneViewModel.FollowInvite(
-                    version: invite.version,
-                    childName: invite.childName,
-                    childPublicKey: invite.childPublicKey,
-                    parentPublicKey: invite.parentPublicKey,
-                    parentKeyPackages: nil
-                )
-            )
-
-        case .shareParent:
-            if let match = matchingParentOption(for: invite.parentPublicKey, in: shareParentOptions) {
-                shareRecipient = match
-                shareSelectedParentKey = match
-            } else {
-                shareRecipient = invite.parentPublicKey
-                shareSelectedParentKey = nil
-            }
-            shareStatusMessage = nil
-            shareStatusIsError = false
-        }
-    }
-
     func applyFollowInvite(_ invite: ParentZoneViewModel.FollowInvite, rawValue: String? = nil) {
         followTargetChildKey = invite.childPublicKey
         followTargetParentKey = invite.parentPublicKey
@@ -2079,24 +1959,6 @@ private extension ParentZoneView {
             followInviteInput = raw
         }
         viewModel.storePendingKeyPackages(from: invite)
-    }
-
-    func normalizedScannedKey(_ rawValue: String, validator: (String) -> Bool) -> String {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return trimmed }
-        if validator(trimmed) {
-            return trimmed
-        }
-
-        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ",;|&?=<>\"'()[]{}:/\\"))
-        let parts = trimmed.components(separatedBy: separators)
-        for part in parts {
-            let candidate = part.trimmingCharacters(in: .whitespacesAndNewlines)
-            if validator(candidate) {
-                return candidate
-            }
-        }
-        return trimmed
     }
 
     func matchingParentOption(for key: String, in options: [String]) -> String? {
@@ -2239,18 +2101,34 @@ private extension ParentZoneView {
         importChildTheme = .ocean
         isImportingChild = false
     }
+
+    func handlePinInput(_ value: String) {
+        switch value {
+        case "⌫":
+            if !viewModel.pinEntry.isEmpty {
+                viewModel.pinEntry.removeLast()
+            }
+        case "OK":
+            viewModel.authenticate()
+        default:
+            guard viewModel.pinEntry.count < 4, value.allSatisfy(\.isNumber) else { return }
+            viewModel.pinEntry.append(contentsOf: value)
+        }
+    }
 }
 
 private enum FamilyViewSelection: String, CaseIterable, Identifiable {
-    case parent
     case children
+    case parent
+
+    static var allCases: [FamilyViewSelection] { [.children, .parent] }
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .parent: return "Parent"
         case .children: return "Children"
+        case .parent: return "Parent"
         }
     }
 }
@@ -2275,35 +2153,6 @@ private enum ParentZoneSection: String, CaseIterable, Identifiable {
         case .storage: return "Storage"
         case .safety: return "Safety"
         case .settings: return "Settings"
-        }
-    }
-}
-
-private enum QRIntent: Identifiable {
-    case importChild
-    case followParent
-    case followChild
-    case shareParent
-
-    var id: String {
-        switch self {
-        case .importChild: return "importChild"
-        case .followParent: return "followParent"
-        case .followChild: return "followChild"
-        case .shareParent: return "shareParent"
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .importChild:
-            return "Scan Child nsec"
-        case .followParent:
-            return "Scan Parent npub"
-        case .followChild:
-            return "Scan Child npub"
-        case .shareParent:
-            return "Scan Parent npub"
         }
     }
 }
@@ -2346,7 +2195,6 @@ private struct ChildImportFormSheet: View {
     @Binding var name: String
     @Binding var secret: String
     @Binding var theme: ThemeDescriptor
-    let onScan: () -> Void
     let onCancel: () -> Void
     let onImport: () -> Void
 
@@ -2366,7 +2214,6 @@ private struct ChildImportFormSheet: View {
                     TextField("nsec1...", text: $secret)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Button("Scan QR", action: onScan)
                 }
             }
             .navigationTitle("Import Child Key")
@@ -2381,42 +2228,6 @@ private struct ChildImportFormSheet: View {
             }
         }
         .presentationDetents([.medium])
-    }
-}
-
-private struct QRScannerSheet: View {
-    let title: String
-    let onResult: (String) -> Void
-    let onCancel: () -> Void
-
-    @State private var isHandlingCode = false
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            QRCodeScannerView { value in
-                guard !isHandlingCode else { return }
-                isHandlingCode = true
-                DispatchQueue.main.async {
-                    onResult(value)
-                }
-            }
-
-            Button {
-                onCancel()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 32))
-                    .padding()
-            }
-        }
-        .overlay(alignment: .topLeading) {
-            Text(title)
-                .font(.headline)
-                .padding()
-                .background(.ultraThinMaterial, in: Capsule())
-                .padding()
-        }
-        .ignoresSafeArea()
     }
 }
 
