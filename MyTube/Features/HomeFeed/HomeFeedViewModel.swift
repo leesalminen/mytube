@@ -282,6 +282,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     }
     
     private func buildDisplayContext(environment: AppEnvironment) async -> DisplayContext {
+        let localParentKey = GroupNameFormatter.canonicalParentKey(try? environment.identityManager.parentIdentity()?.publicKeyHex)
         var groupNames: [String: String] = [:]
         var memberToGroup: [String: String] = [:]
         var parentNames: [String: String] = [:]
@@ -289,28 +290,25 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         do {
             let groups = try await environment.mdkActor.getGroups()
             for group in groups {
-                let trimmed = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                groupNames[group.mlsGroupId] = trimmed.isEmpty ? "Family Group" : trimmed
+                let members = (try? await environment.mdkActor.getMembers(inGroup: group.mlsGroupId)) ?? []
+                let friendly = GroupNameFormatter.friendlyGroupName(
+                    group: group,
+                    members: members,
+                    localParentKey: localParentKey,
+                    parentProfileStore: environment.parentProfileStore
+                )
+                groupNames[group.mlsGroupId] = friendly
 
-                if let members = try? await environment.mdkActor.getMembers(inGroup: group.mlsGroupId) {
-                    for member in members {
-                        let canonicalMember = canonicalParentKey(member)
-                        let key = canonicalMember ?? member.lowercased()
+                for member in members {
+                    let canonicalMember = GroupNameFormatter.canonicalParentKey(member)
+                    let key = canonicalMember ?? member.lowercased()
 
-                        if memberToGroup[key] == nil {
-                            memberToGroup[key] = group.mlsGroupId
-                        }
-                        if parentNames[key] == nil {
-                            let lookupKey = canonicalMember ?? member
-                            if let profile = try? environment.parentProfileStore.profile(for: lookupKey) {
-                                if let candidate = profile.displayName ?? profile.name {
-                                    let cleaned = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    if !cleaned.isEmpty {
-                                        parentNames[key] = cleaned
-                                    }
-                                }
-                            }
-                        }
+                    if memberToGroup[key] == nil {
+                        memberToGroup[key] = group.mlsGroupId
+                    }
+                    if parentNames[key] == nil,
+                       let name = GroupNameFormatter.parentDisplayName(for: canonicalMember ?? member, store: environment.parentProfileStore) {
+                        parentNames[key] = name
                     }
                 }
             }
@@ -325,8 +323,6 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
                 localProfileIds.insert(profileIdHex)
             }
         }
-
-        let localParentKey = canonicalParentKey(try? environment.identityManager.parentIdentity()?.publicKeyHex)
 
         return DisplayContext(
             localProfileIds: localProfileIds,

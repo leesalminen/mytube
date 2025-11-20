@@ -50,17 +50,13 @@ final class ParentZoneViewModel: ObservableObject {
     struct GroupSummary: Equatable {
         let id: String
         let name: String
+        let displayName: String
         let description: String
         let state: String
         let memberCount: Int
         let adminCount: Int
         let relayCount: Int
         let lastMessageAt: Date?
-
-        var displayName: String {
-            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "Family Group" : trimmed
-        }
 
         var isActive: Bool {
             state.lowercased() == "active"
@@ -1849,28 +1845,16 @@ final class ParentZoneViewModel: ObservableObject {
         remoteParentKey: String?,
         childName: String
     ) async -> String {
-        // Get local parent's name
-        let localParentName: String
-        if let localProfile = try? environment.parentProfileStore.profile(for: localParentKey),
-           let name = localProfile.displayName ?? localProfile.name {
-            localParentName = name
-        } else {
-            localParentName = "Me"
-        }
-        
-        // Get remote parent's name if available
-        if let remoteKey = remoteParentKey,
-           let remoteProfile = try? environment.parentProfileStore.profile(for: remoteKey),
-           let remoteName = remoteProfile.displayName ?? remoteProfile.name {
-            // Both names available
-            return "\(localParentName) & \(remoteName)'s Family"
-        } else if remoteParentKey != nil {
-            // Remote parent exists but no published name
-            return "\(localParentName) & Friend's Family"
-        } else {
-            // No remote parent yet (solo group)
-            return "\(localParentName)'s \(childName)"
-        }
+        GroupNameFormatter.friendlyGroupName(
+            localParentKey: localParentKey,
+            remoteParentKey: remoteParentKey,
+            childName: childName,
+            parentProfileStore: environment.parentProfileStore
+        )
+    }
+
+    private func parentDisplayName(for key: String) -> String? {
+        GroupNameFormatter.parentDisplayName(for: key, store: environment.parentProfileStore)
     }
     
     private func tryLinkGroupToChildProfile(groupId: String, groupName: String) async {
@@ -2045,6 +2029,18 @@ final class ParentZoneViewModel: ObservableObject {
         }
     }
 
+    private func makeFriendlyGroupName(group: Group, members: [String]) -> String {
+        let localKeyHex = try? environment.identityManager.parentIdentity()?.publicKeyHex
+        let localKey = GroupNameFormatter.canonicalParentKey(localKeyHex)
+
+        return GroupNameFormatter.friendlyGroupName(
+            group: group,
+            members: members,
+            localParentKey: localKey,
+            parentProfileStore: environment.parentProfileStore
+        )
+    }
+
     private func buildGroupSummary(_ group: Group) async -> GroupSummary? {
         do {
             async let relaysTask = environment.mdkActor.getRelays(inGroup: group.mlsGroupId)
@@ -2057,9 +2053,11 @@ final class ParentZoneViewModel: ObservableObject {
             } else {
                 lastMessage = nil
             }
+            let friendlyName = makeFriendlyGroupName(group: group, members: members)
             return GroupSummary(
                 id: group.mlsGroupId,
                 name: group.name,
+                displayName: friendlyName,
                 description: group.description,
                 state: group.state,
                 memberCount: members.count,
@@ -2434,8 +2432,7 @@ final class ParentZoneViewModel: ObservableObject {
             Parent: \(parentPublicKey)
             Child: \(childPublicKey)
 
-            Open the link below on the destination device:
-            \(encodedURL ?? "")
+            Open the link below on the destination device.
             """
         }
 
@@ -2505,8 +2502,7 @@ final class ParentZoneViewModel: ObservableObject {
             Parent: \(parentPublicKey)
             Profile: \(childPublicKey)
 
-            Open the link below on the other parent's device:
-            \(encodedURL ?? "")
+            Open the link below on the other parent's device.
             """
         }
 
