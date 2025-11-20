@@ -21,6 +21,7 @@ final class PlayerViewModel: ObservableObject {
     @Published var reportError: String?
     @Published var isReporting = false
     @Published var reportSuccess = false
+    @Published private(set) var isPublishing = false
 
     var player: AVPlayer { internalPlayer }
 
@@ -34,6 +35,11 @@ final class PlayerViewModel: ObservableObject {
     private var viewerChildNpub: String?
     private var viewerDisplayName: String?
     private var cancellables: Set<AnyCancellable> = []
+    private var cachedParentKey: String?
+
+    var shouldShowPublishAction: Bool {
+        video.approvalStatus == .pending
+    }
 
     init(rankedVideo: RankingEngine.RankedVideo, environment: AppEnvironment) {
         self.video = rankedVideo.video
@@ -183,6 +189,30 @@ final class PlayerViewModel: ObservableObject {
 
     func clearLikeError() {
         likeError = nil
+    }
+
+    func publishPendingVideo(pin: String) async throws {
+        guard shouldShowPublishAction else { return }
+        guard try environment.parentAuth.validate(pin: pin) else {
+            throw ParentAuthError.invalidPIN
+        }
+
+        let parentKey = cachedParentKey ?? (try? environment.keyStore.fetchKeyPair(role: .parent)?.publicKeyHex.lowercased())
+        if cachedParentKey == nil {
+            cachedParentKey = parentKey
+        }
+
+        isPublishing = true
+        defer { isPublishing = false }
+
+        do {
+            try await environment.videoShareCoordinator.publishVideo(video.id)
+            video.approvalStatus = .approved
+            video.approvedAt = Date()
+            video.approvedByParentKey = parentKey
+        } catch {
+            throw error
+        }
     }
 
     func reportVideo(

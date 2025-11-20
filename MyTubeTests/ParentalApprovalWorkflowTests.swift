@@ -124,7 +124,8 @@ private func makeHarness() throws -> (
         keyStore: keyStore,
         videoSharePublisher: videoSharePublisher,
         marmotShareService: marmotShareService,
-        parentalControlsStore: parentalControlsStore
+        parentalControlsStore: parentalControlsStore,
+        mdkActor: mdkActor
     )
 
     // Seed a profile with a group for sharing.

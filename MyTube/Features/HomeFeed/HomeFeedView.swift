@@ -13,8 +13,6 @@ struct HomeFeedView: View {
     @StateObject private var viewModel = HomeFeedViewModel()
     @State private var selectedVideo: RankingEngine.RankedVideo?
     @State private var showingTrustedCreatorsInfo = false
-    @State private var videoToPublish: VideoModel?
-    @State private var showingPINPrompt = false
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .short
@@ -59,13 +57,6 @@ struct HomeFeedView: View {
                 .presentationCornerRadius(32)
                 .presentationSizingPageIfAvailable()
         }
-        .sheet(isPresented: $showingPINPrompt) {
-            if let videoToPublish {
-                PINPromptView(title: "Publish Video") { pin in
-                    try await viewModel.publishVideo(videoToPublish.id, pin: pin)
-                }
-            }
-        }
         .onAppear {
             viewModel.bind(to: appEnvironment)
         }
@@ -105,7 +96,7 @@ struct HomeFeedView: View {
                 }
                 ForEach(viewModel.sharedSections) { section in
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(section.ownerDisplayName)
+                        Text(section.title)
                             .font(.headline)
                             .foregroundStyle(.primary)
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -136,9 +127,7 @@ struct HomeFeedView: View {
                         title: shelf.rawValue,
                         videos: Array(videos.dropFirst()),
                         onSelect: { selectedVideo = $0 },
-                        thumbnailLoader: loadThumbnail,
-                        onPublish: beginPublish(for:),
-                        isPublishing: { viewModel.publishingVideoIds.contains($0) }
+                        thumbnailLoader: loadThumbnail
                     )
                 }
             } else if let videos = viewModel.shelves[shelf], !videos.isEmpty {
@@ -146,9 +135,7 @@ struct HomeFeedView: View {
                     title: shelf.rawValue,
                     videos: videos,
                     onSelect: { selectedVideo = $0 },
-                    thumbnailLoader: loadThumbnail,
-                    onPublish: beginPublish(for:),
-                    isPublishing: { viewModel.publishingVideoIds.contains($0) }
+                    thumbnailLoader: loadThumbnail
                 )
             }
         }
@@ -164,11 +151,6 @@ struct HomeFeedView: View {
             return nil
         }
         return UIImage(contentsOfFile: url.path)
-    }
-
-    private func beginPublish(for video: VideoModel) {
-        videoToPublish = video
-        showingPINPrompt = true
     }
 
     @ViewBuilder
@@ -281,8 +263,6 @@ private struct ShelfView: View {
     let videos: [RankingEngine.RankedVideo]
     let onSelect: (RankingEngine.RankedVideo) -> Void
     let thumbnailLoader: (VideoModel) -> UIImage?
-    let onPublish: (VideoModel) -> Void
-    let isPublishing: (UUID) -> Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -294,11 +274,7 @@ private struct ShelfView: View {
                         VideoCard(
                             video: rankedVideo.video,
                             image: thumbnailLoader(rankedVideo.video),
-                            onTap: { onSelect(rankedVideo) },
-                            onPublish: {
-                                onPublish(rankedVideo.video)
-                            },
-                            isPublishing: isPublishing(rankedVideo.video.id)
+                            onTap: { onSelect(rankedVideo) }
                         )
                     }
                 }
@@ -313,8 +289,6 @@ private struct VideoCard: View {
     let video: VideoModel
     let image: UIImage?
     let onTap: () -> Void
-    let onPublish: (() -> Void)?
-    let isPublishing: Bool
 
     private var appAccent: Color { appEnvironment.activeProfile.theme.kidPalette.accent }
     private var isPending: Bool { video.approvalStatus == .pending }
@@ -376,25 +350,6 @@ private struct VideoCard: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 onTap()
-            }
-
-            if isPending, let onPublish {
-                Button {
-                    onPublish()
-                } label: {
-                    HStack {
-                        if isPublishing {
-                            ProgressView()
-                                .tint(.white)
-                        }
-                        Text("Publish to Family")
-                            .fontWeight(.semibold)
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(KidPrimaryButtonStyle())
-                .frame(width: 220)
-                .disabled(isPublishing)
             }
         }
     }

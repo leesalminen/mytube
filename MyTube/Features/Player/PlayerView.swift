@@ -13,6 +13,7 @@ struct PlayerView: View {
     @StateObject private var viewModel: PlayerViewModel
     private let environment: AppEnvironment
     @State private var showingReportSheet = false
+    @State private var showingPublishPIN = false
 
     init(rankedVideo: RankingEngine.RankedVideo, environment: AppEnvironment) {
         self.environment = environment
@@ -22,7 +23,28 @@ struct PlayerView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                HStack {
+                HStack(spacing: 12) {
+                    if viewModel.shouldShowPublishAction {
+                        Button {
+                            showingPublishPIN = true
+                        } label: {
+                            HStack(spacing: 8) {
+                                if viewModel.isPublishing {
+                                    ProgressView()
+                                        .tint(Color.accentColor)
+                                } else {
+                                    Image(systemName: "paperplane.fill")
+                                }
+                                Text("Publish")
+                                    .fontWeight(.semibold)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                            .foregroundStyle(Color.accentColor)
+                        }
+                        .disabled(viewModel.isPublishing)
+                    }
                     Spacer()
                     ReportButtonChip {
                         viewModel.reportError = nil
@@ -40,7 +62,7 @@ struct PlayerView: View {
                     Text(viewModel.video.title)
                         .font(.title.bold())
                     ProgressView(value: viewModel.progress)
-                        .tint(.accentColor)
+                        .tint(Color.accentColor)
 
                     HStack(spacing: 24) {
                         PlaybackControlButton(systemName: viewModel.video.liked ? "heart.fill" : "heart") {
@@ -117,6 +139,11 @@ struct PlayerView: View {
             }
         } message: {
             Text(viewModel.likeError ?? "Something went wrong.")
+        }
+        .sheet(isPresented: $showingPublishPIN) {
+            PINPromptView(title: "Publish Video") { pin in
+                try await viewModel.publishPendingVideo(pin: pin)
+            }
         }
     }
 }

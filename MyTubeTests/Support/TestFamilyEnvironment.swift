@@ -164,7 +164,8 @@ class TestFamilyEnvironment {
             keyStore: keyStore,
             videoSharePublisher: videoSharePublisher,
             marmotShareService: marmotShareService,
-            parentalControlsStore: parentalControlsStore
+            parentalControlsStore: parentalControlsStore,
+            mdkActor: mdkActor
         )
         let reportCoordinator = ReportCoordinator(
             reportStore: reportStore,

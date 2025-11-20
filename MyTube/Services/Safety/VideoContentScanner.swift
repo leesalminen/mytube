@@ -25,6 +25,7 @@ final class VideoContentScanner {
     ]
 
     private let processingQueue = DispatchQueue(label: "com.mytube.contentScanner", qos: .userInitiated)
+    private var poseDetectionUsable = true
 
     func scan(url: URL, progress: (@Sendable (String) -> Void)? = nil) async -> ContentScanResult {
         await Task.detached(priority: .utility) {
@@ -158,12 +159,18 @@ final class VideoContentScanner {
     }
 
     private func detectSuggestivePose(cgImage: CGImage) -> Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #endif
+
+        guard poseDetectionUsable else { return false }
         let request = VNDetectHumanBodyPoseRequest()
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         do {
             try handler.perform([request])
             return (request.results as? [VNHumanBodyPoseObservation])?.isEmpty == false
         } catch {
+            poseDetectionUsable = false
             return false
         }
     }

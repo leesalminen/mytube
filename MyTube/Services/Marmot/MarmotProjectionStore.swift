@@ -166,7 +166,7 @@ actor MarmotProjectionStore {
             // Follow messages are handled by ParentZoneViewModel.processFollowMessagesInGroup
             // We just log and skip here to avoid duplicate processing
         case .videoShare:
-            try projectShare(content: content, processedAt: processedDate)
+            try projectShare(content: content, mlsGroupId: message.mlsGroupId, processedAt: processedDate)
         case .videoRevoke:
             try projectLifecycle(content: content, status: .revoked, processedAt: processedDate)
         case .videoDelete:
@@ -198,7 +198,7 @@ actor MarmotProjectionStore {
         }
     }
 
-    private func projectShare(content: String, processedAt: Date) throws {
+    private func projectShare(content: String, mlsGroupId: String, processedAt: Date) throws {
         logger.info("         📹 Projecting video share...")
         guard let metadataJSON = content.data(using: .utf8) else {
             throw ProjectionError.invalidPayload
@@ -213,7 +213,8 @@ actor MarmotProjectionStore {
         let model = try remoteVideoStore.upsertRemoteVideoShare(
             message: message,
             metadataJSON: metadataString,
-            receivedAt: processedAt
+            receivedAt: processedAt,
+            mlsGroupId: mlsGroupId
         )
         logger.info("         ✅ Video share projected to RemoteVideoStore: \(model.id)")
     }

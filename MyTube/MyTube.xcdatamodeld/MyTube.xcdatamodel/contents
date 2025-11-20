@@ -30,6 +30,7 @@
     <entity name="RemoteVideo" representedClassName="RemoteVideoEntity" syncable="YES" codeGenerationType="class">
         <attribute name="videoId" optional="NO" attributeType="String"/>
         <attribute name="ownerChild" optional="NO" attributeType="String"/>
+        <attribute name="mlsGroupId" optional="YES" attributeType="String"/>
         <attribute name="title" optional="NO" attributeType="String" defaultValueString="Untitled"/>
         <attribute name="duration" optional="NO" attributeType="Double" defaultValueString="0.0"/>
         <attribute name="createdAt" optional="NO" attributeType="Date" usesScalarValueType="NO"/>

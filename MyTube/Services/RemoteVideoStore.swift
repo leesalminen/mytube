@@ -52,6 +52,7 @@ struct RemoteVideoModel: Identifiable, Sendable {
 
     let id: String
     let ownerChild: String
+    let mlsGroupId: String?
     let title: String
     let duration: Double
     let createdAt: Date
@@ -95,6 +96,7 @@ struct RemoteVideoModel: Identifiable, Sendable {
 
         id = videoId
         self.ownerChild = ownerChild
+        self.mlsGroupId = entity.mlsGroupId
         title = entity.title ?? "Untitled"
         duration = entity.duration
         createdAt = entity.createdAt ?? Date()
@@ -296,7 +298,8 @@ final class RemoteVideoStore {
     func upsertRemoteVideoShare(
         message: VideoShareMessage,
         metadataJSON: String,
-        receivedAt: Date
+        receivedAt: Date,
+        mlsGroupId: String?
     ) throws -> RemoteVideoModel {
         let context = persistence.newBackgroundContext()
         var model: RemoteVideoModel?
@@ -342,6 +345,7 @@ final class RemoteVideoStore {
                 }
                 entity.downloadError = nil
                 entity.lastSyncedAt = receivedAt
+                entity.mlsGroupId = mlsGroupId ?? entity.mlsGroupId
 
                 try context.save()
                 model = RemoteVideoModel(entity: entity)

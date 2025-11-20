@@ -38,6 +38,11 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     private var remoteFetchedResultsController: NSFetchedResultsController<RemoteVideoEntity>?
     private var keepAliveTask: Task<Void, Never>?
     private let keepAliveInterval: UInt64 = 60 * NSEC_PER_SEC
+    private let metadataDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return decoder
+    }()
 
     func bind(to environment: AppEnvironment) {
         guard self.environment == nil else { return }
@@ -206,11 +211,18 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             }
         }
 
-        let grouped = Dictionary(grouping: visibleItems, by: { $0.ownerKey })
+        let grouped = Dictionary(grouping: visibleItems, by: { $0.groupId ?? $0.ownerKey })
         var sections: [SharedRemoteSection] = grouped.map { key, videos in
             let sortedVideos = videos.sorted { $0.video.createdAt > $1.video.createdAt }
-            let displayName = sortedVideos.first?.ownerDisplayName ?? fallbackOwnerLabel(for: key)
-            return SharedRemoteSection(ownerDisplayName: displayName, ownerKey: key, videos: sortedVideos)
+            let first = sortedVideos.first
+            let title = sectionTitle(from: first, fallbackKey: key)
+            return SharedRemoteSection(
+                id: first?.groupId ?? key,
+                title: title,
+                groupId: first?.groupId,
+                groupName: first?.groupName,
+                videos: sortedVideos
+            )
         }
 
         sections.sort { lhs, rhs in
@@ -221,7 +233,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
 
         print("   Created \(sections.count) section(s)")
         for section in sections {
-            print("      Section: \(section.ownerDisplayName) - \(section.videos.count) videos")
+            print("      Section: \(section.title) - \(section.videos.count) videos")
         }
         
         sharedSections = sections
@@ -251,52 +263,61 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         }
     }
 
+    private func sectionTitle(from video: SharedRemoteVideo?, fallbackKey: String) -> String {
+        if let name = trimmed(video?.groupName) {
+            return name
+        }
+        if let owner = trimmed(video?.ownerDisplayName) {
+            return owner
+        }
+        return fallbackOwnerLabel(for: fallbackKey)
+    }
+
     private struct DisplayContext {
-        let groupName: String?
         let localProfileIds: Set<String>  // Local child profile IDs
-        let localParentName: String?
-        let remoteParentKey: String?
-        let remoteParentName: String?
+        let localParentKey: String?
+        let groupNames: [String: String]  // mlsGroupId -> display name
+        let memberToGroup: [String: String]  // parent pubkey -> mlsGroupId
+        let parentNames: [String: String]  // parent pubkey -> display name
     }
     
     private func buildDisplayContext(environment: AppEnvironment) async -> DisplayContext {
-        // Get group info if we're in exactly one group
-        var groupName: String?
-        var remoteParentKey: String?
-        
+        var groupNames: [String: String] = [:]
+        var memberToGroup: [String: String] = [:]
+        var parentNames: [String: String] = [:]
+
         do {
             let groups = try await environment.mdkActor.getGroups()
-            if groups.count == 1, let group = groups.first {
-                groupName = group.name
-                
-                // Get group members to find the remote parent
-                let memberKeys = try await environment.mdkActor.getMembers(inGroup: group.mlsGroupId)
-                let localParentKey = try? environment.identityManager.parentIdentity()?.publicKeyHex.lowercased()
-                
-                // Find the first member that's not us - that's the remote parent
-                remoteParentKey = memberKeys.first { memberKey in
-                    memberKey.lowercased() != localParentKey
+            for group in groups {
+                let trimmed = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                groupNames[group.mlsGroupId] = trimmed.isEmpty ? "Family Group" : trimmed
+
+                if let members = try? await environment.mdkActor.getMembers(inGroup: group.mlsGroupId) {
+                    for member in members {
+                        let canonicalMember = canonicalParentKey(member)
+                        let key = canonicalMember ?? member.lowercased()
+
+                        if memberToGroup[key] == nil {
+                            memberToGroup[key] = group.mlsGroupId
+                        }
+                        if parentNames[key] == nil {
+                            let lookupKey = canonicalMember ?? member
+                            if let profile = try? environment.parentProfileStore.profile(for: lookupKey) {
+                                if let candidate = profile.displayName ?? profile.name {
+                                    let cleaned = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    if !cleaned.isEmpty {
+                                        parentNames[key] = cleaned
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         } catch {
-            // Ignore
+            // Ignore MDK failures; we'll fall back to generic labels later.
         }
-        
-        // Get local parent's name
-        var localParentName: String?
-        if let localParentKey = try? environment.identityManager.parentIdentity()?.publicKeyHex,
-           let profile = try? environment.parentProfileStore.profile(for: localParentKey) {
-            localParentName = profile.displayName ?? profile.name
-        }
-        
-        // Get remote parent's name if available
-        var remoteParentName: String?
-        if let remoteKey = remoteParentKey,
-           let profile = try? environment.parentProfileStore.profile(for: remoteKey) {
-            remoteParentName = profile.displayName ?? profile.name
-        }
-        
-        // Get local child profile IDs (to identify if a video is from ourselves)
+
         var localProfileIds: Set<String> = []
         if let localProfiles = try? environment.profileStore.fetchProfiles() {
             for profile in localProfiles {
@@ -304,41 +325,102 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
                 localProfileIds.insert(profileIdHex)
             }
         }
-        
+
+        let localParentKey = canonicalParentKey(try? environment.identityManager.parentIdentity()?.publicKeyHex)
+
         return DisplayContext(
-            groupName: groupName,
             localProfileIds: localProfileIds,
-            localParentName: localParentName,
-            remoteParentKey: remoteParentKey,
-            remoteParentName: remoteParentName
+            localParentKey: localParentKey,
+            groupNames: groupNames,
+            memberToGroup: memberToGroup,
+            parentNames: parentNames
         )
     }
     
     private func makeSharedVideo(from model: RemoteVideoModel, context: DisplayContext) -> SharedRemoteVideo {
-        let display = resolveOwnerDisplay(for: model, context: context)
+        let metadata = decodeShareMessage(from: model.metadataJSON)
+        let groupId = resolveGroupId(for: model, metadata: metadata, context: context)
+        let groupName = resolveGroupName(for: groupId, context: context)
+        let display = resolveOwnerDisplay(for: model, metadata: metadata, context: context)
         let canonical = canonicalOwnerKey(for: model.ownerChild) ?? model.ownerChild
-        return SharedRemoteVideo(video: model, ownerDisplayName: display, ownerKey: canonical)
+        return SharedRemoteVideo(
+            video: model,
+            ownerDisplayName: display,
+            ownerKey: canonical,
+            groupId: groupId,
+            groupName: groupName
+        )
     }
 
-    private func resolveOwnerDisplay(for model: RemoteVideoModel, context: DisplayContext) -> String {
-        // Strategy 1: Check if this is from ourselves
+    private func decodeShareMessage(from json: String) -> VideoShareMessage? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? metadataDecoder.decode(VideoShareMessage.self, from: data)
+    }
+
+    private func resolveGroupId(for model: RemoteVideoModel, metadata: VideoShareMessage?, context: DisplayContext) -> String? {
+        if let stored = model.mlsGroupId, !stored.isEmpty {
+            return stored
+        }
+        if let senderKey = canonicalParentKey(metadata?.by),
+           let groupId = context.memberToGroup[senderKey] {
+            return groupId
+        }
+        if let senderKey = metadata?.by.lowercased(),
+           let groupId = context.memberToGroup[senderKey] {
+            return groupId
+        }
+        return nil
+    }
+
+    private func resolveGroupName(for groupId: String?, context: DisplayContext) -> String? {
+        guard let groupId else { return nil }
+        return context.groupNames[groupId]
+    }
+
+    private func resolveOwnerDisplay(
+        for model: RemoteVideoModel,
+        metadata: VideoShareMessage?,
+        context: DisplayContext
+    ) -> String {
         let ownerIdNormalized = model.ownerChild.lowercased()
         if context.localProfileIds.contains(ownerIdNormalized) {
-            return "My Videos"  // This is from our own profile - shouldn't show in remote section
+            return "My Videos"
         }
-        
-        // Strategy 2: Show remote parent's name if available
-        if let remoteName = context.remoteParentName {
-            return remoteName
+
+        if let childName = trimmed(metadata?.childName) {
+            return childName
         }
-        
-        // Strategy 3: Use group name (might contain both parent names like "Alice & Bob's Family")
-        if let groupName = context.groupName {
+
+        if let senderKey = canonicalParentKey(metadata?.by),
+           senderKey == context.localParentKey {
+            return "My Videos"
+        }
+
+        if let senderKey = canonicalParentKey(metadata?.by),
+           let parentName = context.parentNames[senderKey] {
+            return parentName
+        }
+
+        if let senderKey = metadata?.by.lowercased(),
+           let parentName = context.parentNames[senderKey] {
+            return parentName
+        }
+
+        if let groupName = resolveGroupName(for: resolveGroupId(for: model, metadata: metadata, context: context), context: context) {
             return groupName
         }
-        
-        // Strategy 4: Fallback
-        return "Trusted Family"
+
+        if let senderKey = metadata?.by {
+            return fallbackOwnerLabel(for: senderKey)
+        }
+
+        return fallbackOwnerLabel(for: model.ownerChild)
+    }
+
+    private func trimmed(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let result = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result.isEmpty ? nil : result
     }
 
     private func fallbackOwnerLabel(for key: String) -> String {
@@ -363,6 +445,11 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
             return "\(trimmed.prefix(8))…"
         }
         return trimmed
+    }
+
+    private func canonicalParentKey(_ value: String?) -> String? {
+        guard let value else { return nil }
+        return ParentIdentityKey(string: value)?.hex.lowercased()
     }
 
     private func canonicalOwnerKey(for key: String) -> String? {
@@ -469,11 +556,12 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     }
 
     struct SharedRemoteSection: Identifiable {
-        let ownerDisplayName: String
-        let ownerKey: String
+        let id: String
+        let title: String
+        let groupId: String?
+        let groupName: String?
         let videos: [SharedRemoteVideo]
 
-        var id: String { ownerKey }
         var latestActivity: Date? { videos.first?.video.createdAt }
     }
 
@@ -481,6 +569,8 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         let video: RemoteVideoModel
         let ownerDisplayName: String
         let ownerKey: String
+        let groupId: String?
+        let groupName: String?
 
         var id: String { video.id }
     }

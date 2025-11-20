@@ -17,6 +17,7 @@ final class VideoShareCoordinator {
     private let videoSharePublisher: VideoSharePublisher
     private let marmotShareService: MarmotShareService
     private let parentalControlsStore: ParentalControlsStore
+    private let mdkActor: MdkActor
     private let logger = Logger(subsystem: "com.mytube", category: "VideoShareCoordinator")
     private var contextObserver: NSObjectProtocol?
 
@@ -28,6 +29,7 @@ final class VideoShareCoordinator {
         case videoMissing
         case invalidState
         case parentKeyMissing
+        case deliveryFailed
     }
 
     init(
@@ -35,13 +37,15 @@ final class VideoShareCoordinator {
         keyStore: KeychainKeyStore,
         videoSharePublisher: VideoSharePublisher,
         marmotShareService: MarmotShareService,
-        parentalControlsStore: ParentalControlsStore
+        parentalControlsStore: ParentalControlsStore,
+        mdkActor: MdkActor
     ) {
         self.persistence = persistence
         self.keyStore = keyStore
         self.videoSharePublisher = videoSharePublisher
         self.marmotShareService = marmotShareService
         self.parentalControlsStore = parentalControlsStore
+        self.mdkActor = mdkActor
 
         contextObserver = NotificationCenter.default.addObserver(
             forName: .NSManagedObjectContextDidSave,
@@ -110,7 +114,7 @@ final class VideoShareCoordinator {
                 return
             }
 
-            await share(video: video)
+            _ = await share(video: video)
         } catch {
             logger.error("Failed to prepare video share: \(error.localizedDescription, privacy: .public)")
         }
@@ -151,9 +155,9 @@ final class VideoShareCoordinator {
         }
     }
 
-    private func share(video: VideoModel) async {
+    private func share(video: VideoModel) async -> Int {
         if inflightVideoIDs.contains(video.id) {
-            return
+            return 0
         }
         inflightVideoIDs.insert(video.id)
         defer { inflightVideoIDs.remove(video.id) }
@@ -161,27 +165,32 @@ final class VideoShareCoordinator {
         do {
             guard video.approvalStatus == .approved else {
                 logger.info("Share skipped for \(video.id.uuidString, privacy: .public); approval status \(video.approvalStatus.rawValue, privacy: .public)")
-                return
+                return 0
             }
-            guard let parentPair = try keyStore.fetchKeyPair(role: .parent) else {
+            guard let _ = try keyStore.fetchKeyPair(role: .parent) else {
                 logger.info("Skipping share; parent identity missing.")
-                return
+                return 0
             }
             
             // Children no longer have keys - use profile ID as identifier
             let childProfileId = video.profileId.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let ownerChildKey = childProfileId  // Use profile ID instead of child pubkey
 
-            // Get the group ID for this child's profile
-            guard let profile = try? persistence.viewContext.fetch(ProfileEntity.fetchRequest()).first(where: { $0.id == video.profileId }),
-                  let groupId = profile.mlsGroupId else {
-                logger.debug("No Marmot group for video \(video.id.uuidString, privacy: .public); deferring share.")
+            // Get the group IDs for this child's profile
+            let results = try fetchProfile(id: video.profileId)
+            guard let profile = results.profile else {
+                logger.debug("No profile for video \(video.id.uuidString, privacy: .public); deferring share.")
                 pendingVideoIDs.insert(video.id)
-                return
+                return 0
+            }
+            let groupIds = await groupIds(for: profile)
+            guard !groupIds.isEmpty else {
+                logger.debug("No Marmot groups for video \(video.id.uuidString, privacy: .public); deferring share.")
+                pendingVideoIDs.insert(video.id)
+                return 0
             }
 
-            logger.info("📤 Sharing video \(video.id.uuidString, privacy: .public) to group \(groupId.prefix(16), privacy: .public)... for profile \(video.profileId.uuidString, privacy: .public)")
-            let groupIds = [groupId]
+            logger.info("📤 Sharing video \(video.id.uuidString, privacy: .public) to \(groupIds.count) group(s) for profile \(video.profileId.uuidString, privacy: .public)")
 
             let shareMessage = try await videoSharePublisher.makeShareMessage(
                 video: video,
@@ -189,12 +198,14 @@ final class VideoShareCoordinator {
             )
 
             var failedGroups: [String] = []
+            var publishedCount = 0
             for groupId in groupIds {
                 do {
                     _ = try await marmotShareService.publishVideoShare(
                         message: shareMessage,
                         mlsGroupId: groupId
                     )
+                    publishedCount += 1
                 } catch {
                     logger.error("Failed sharing video \(video.id.uuidString, privacy: .public) to group \(groupId, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     failedGroups.append(groupId)
@@ -208,9 +219,11 @@ final class VideoShareCoordinator {
                 pendingVideoIDs.insert(video.id)
                 logger.error("Automatic share for video \(video.id.uuidString, privacy: .public) failed for \(failedGroups.count) group(s).")
             }
+            return publishedCount
         } catch {
             pendingVideoIDs.insert(video.id)
             logger.error("Share attempt failed for video \(video.id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return 0
         }
     }
 
@@ -223,7 +236,7 @@ final class VideoShareCoordinator {
                     pendingVideoIDs.remove(videoId)
                     continue
                 }
-                await share(video: video)
+                _ = await share(video: video)
             } catch {
                 logger.error("Retry share failed for video \(videoId.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
@@ -237,7 +250,11 @@ final class VideoShareCoordinator {
 
         let video = try await markVideoAsApproved(videoId: videoId, parentKey: parentKey)
         pendingVideoIDs.insert(video.id)
-        await share(video: video)
+        let publishedCount = await share(video: video)
+        if publishedCount == 0 {
+            await retryPendingShares()
+            throw PublishError.deliveryFailed
+        }
     }
 
     func markVideoAsApproved(videoId: UUID, parentKey: String) async throws -> VideoModel {
@@ -281,6 +298,36 @@ final class VideoShareCoordinator {
         return object.entity.name == "Video" ? object.objectID : nil
     }
 
+    private func fetchProfile(id: UUID) throws -> (profile: ProfileEntity?, name: String?) {
+        let request = ProfileEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        request.fetchLimit = 1
+        let profile = try persistence.viewContext.fetch(request).first
+        return (profile, profile?.name)
+    }
+
+    private func groupIds(for profile: ProfileEntity) async -> [String] {
+        var ids = Set<String>()
+        if let primary = profile.mlsGroupId, !primary.isEmpty {
+            ids.insert(primary)
+        }
+
+        let childName = profile.name?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        guard let groups = try? await mdkActor.getGroups() else {
+            return Array(ids)
+        }
+
+        for group in groups {
+            let nameMatch = group.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let descriptionMatch = group.description.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !childName.isEmpty &&
+                (nameMatch.contains(childName) || descriptionMatch.contains(childName) || descriptionMatch.contains("secure sharing for \(childName)")) {
+                ids.insert(group.mlsGroupId)
+            }
+        }
+        return Array(ids)
+    }
+
     // Follow relationship logic removed - using MDK groups directly
 }
 
@@ -293,6 +340,8 @@ extension VideoShareCoordinator.PublishError: LocalizedError {
             return "This video is not waiting for approval."
         case .parentKeyMissing:
             return "Parent identity is missing; add a parent key to approve videos."
+        case .deliveryFailed:
+            return "Could not deliver the video to any trusted families. Check your connection and try again."
         }
     }
 }

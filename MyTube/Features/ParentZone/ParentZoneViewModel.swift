@@ -601,7 +601,7 @@ final class ParentZoneViewModel: ObservableObject {
             localParentHex: parentIdentity.publicKeyHex
         ) else {
             throw ShareFlowError.noApprovedFamilies
-        }
+            }
 
         guard let groupId = resolvedGroupId(for: follow) else {
             throw GroupMembershipWorkflowError.groupIdentifierMissing
