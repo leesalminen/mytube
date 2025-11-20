@@ -92,6 +92,11 @@
         <attribute name="title" optional="NO" attributeType="String" defaultValueString="Untitled"/>
         <attribute name="reportedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
         <attribute name="reportReason" optional="YES" attributeType="String"/>
+        <attribute name="approvalStatus" optional="NO" attributeType="String" defaultValueString="approved"/>
+        <attribute name="approvedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="approvedByParentKey" optional="YES" attributeType="String"/>
+        <attribute name="scanResults" optional="YES" attributeType="String"/>
+        <attribute name="scanCompletedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
     </entity>
     <entity name="Like" representedClassName="LikeEntity" syncable="YES" codeGenerationType="class">
         <attribute name="id" optional="NO" attributeType="UUID" usesScalarValueType="NO"/>

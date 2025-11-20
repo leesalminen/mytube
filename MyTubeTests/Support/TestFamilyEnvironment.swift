@@ -39,6 +39,7 @@ class TestFamilyEnvironment {
         let storageSuite = "Test.\(name).Storage.\(UUID().uuidString)"
         let safetySuite = "Test.\(name).Safety.\(UUID().uuidString)"
         let relaySuite = "Test.\(name).Relays.\(UUID().uuidString)"
+        let parentalSuite = "Test.\(name).Parental.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: defaultsSuite)!
         userDefaults.removePersistentDomain(forName: defaultsSuite)
         let storageDefaults = UserDefaults(suiteName: storageSuite)!
@@ -47,6 +48,8 @@ class TestFamilyEnvironment {
         safetyDefaults.removePersistentDomain(forName: safetySuite)
         let relayDefaults = UserDefaults(suiteName: relaySuite)!
         relayDefaults.removePersistentDomain(forName: relaySuite)
+        let parentalDefaults = UserDefaults(suiteName: parentalSuite)!
+        parentalDefaults.removePersistentDomain(forName: parentalSuite)
 
         // Nostr - using real relay for end-to-end testing
         self.nostrClient = RelayPoolNostrClient()
@@ -114,7 +117,14 @@ class TestFamilyEnvironment {
         )
         
         // Other required components (stubs or minimal impls)
-        let videoLibrary = VideoLibrary(persistence: persistence, storagePaths: storagePaths)
+        let parentalControlsStore = ParentalControlsStore(userDefaults: parentalDefaults)
+        let videoContentScanner = VideoContentScanner()
+        let videoLibrary = VideoLibrary(
+            persistence: persistence,
+            storagePaths: storagePaths,
+            parentalControlsStore: parentalControlsStore,
+            contentScanner: videoContentScanner
+        )
         let thumbnailer = Thumbnailer(storagePaths: storagePaths)
         let editRenderer = EditRenderer(storagePaths: storagePaths)
         let parentAuth = ParentAuth()
@@ -153,7 +163,8 @@ class TestFamilyEnvironment {
             persistence: persistence,
             keyStore: keyStore,
             videoSharePublisher: videoSharePublisher,
-            marmotShareService: marmotShareService
+            marmotShareService: marmotShareService,
+            parentalControlsStore: parentalControlsStore
         )
         let reportCoordinator = ReportCoordinator(
             reportStore: reportStore,
@@ -250,6 +261,8 @@ class TestFamilyEnvironment {
             backendClient: backendClient,
             storageConfigurationStore: storageConfig,
             safetyConfigurationStore: safetyConfig,
+            parentalControlsStore: parentalControlsStore,
+            videoContentScanner: videoContentScanner,
             managedStorageClient: managedStorageClient,
             byoStorageClient: minio,
             backendBaseURL: URL(string: "https://api.example.com")!,

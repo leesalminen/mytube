@@ -73,7 +73,17 @@ struct MyTubeTests {
         try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempBase) }
         let storage = try StoragePaths(baseURL: tempBase)
-        let library = VideoLibrary(persistence: persistence, storagePaths: storage)
+        let defaultsSuite = "com.mytube.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuite)!
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let controls = ParentalControlsStore(userDefaults: defaults)
+        let scanner = VideoContentScanner()
+        let library = VideoLibrary(
+            persistence: persistence,
+            storagePaths: storage,
+            parentalControlsStore: controls,
+            contentScanner: scanner
+        )
 
         let profileID = UUID()
         let profile = ProfileEntity(context: persistence.viewContext)

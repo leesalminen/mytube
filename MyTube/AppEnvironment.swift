@@ -47,6 +47,8 @@ final class AppEnvironment: ObservableObject {
     let backendClient: BackendClient
     let storageConfigurationStore: StorageConfigurationStore
     let safetyConfigurationStore: SafetyConfigurationStore
+    let parentalControlsStore: ParentalControlsStore
+    let videoContentScanner: VideoContentScanner
     private let managedStorageClient: ManagedStorageClient
     private var byoStorageClient: MinIOClient?
     private var backendBaseURL: URL
@@ -101,6 +103,8 @@ final class AppEnvironment: ObservableObject {
         backendClient: BackendClient,
         storageConfigurationStore: StorageConfigurationStore,
         safetyConfigurationStore: SafetyConfigurationStore,
+        parentalControlsStore: ParentalControlsStore,
+        videoContentScanner: VideoContentScanner,
         managedStorageClient: ManagedStorageClient,
         byoStorageClient: MinIOClient?,
         backendBaseURL: URL,
@@ -146,6 +150,8 @@ final class AppEnvironment: ObservableObject {
         self.backendClient = backendClient
         self.storageConfigurationStore = storageConfigurationStore
         self.safetyConfigurationStore = safetyConfigurationStore
+        self.parentalControlsStore = parentalControlsStore
+        self.videoContentScanner = videoContentScanner
         self.managedStorageClient = managedStorageClient
         self.byoStorageClient = byoStorageClient
         self.backendBaseURL = backendBaseURL
@@ -193,7 +199,15 @@ enum StorageModeError: Error {
                 .appendingPathComponent("mdk-fallback.sqlite", isDirectory: false)
             mdkActor = try! MdkActor(databaseURL: fallbackURL)
         }
-        let videoLibrary = VideoLibrary(persistence: persistence, storagePaths: storagePaths)
+        let defaults = UserDefaults.standard
+        let parentalControlsStore = ParentalControlsStore(userDefaults: defaults)
+        let videoContentScanner = VideoContentScanner()
+        let videoLibrary = VideoLibrary(
+            persistence: persistence,
+            storagePaths: storagePaths,
+            parentalControlsStore: parentalControlsStore,
+            contentScanner: videoContentScanner
+        )
         let remoteVideoStore = RemoteVideoStore(persistence: persistence)
         let remotePlaybackStore = RemotePlaybackStore(persistence: persistence)
         let profileStore = ProfileStore(persistence: persistence)
@@ -207,7 +221,6 @@ enum StorageModeError: Error {
         let childProfileStore = ChildProfileStore(persistence: persistence)
         let cryptoService = CryptoEnvelopeService()
         let nostrClient = RelayPoolNostrClient()
-        let defaults = UserDefaults.standard
         let relayDirectory = RelayDirectory(userDefaults: defaults)
         let marmotTransport = MarmotTransport(
             nostrClient: nostrClient,
@@ -338,7 +351,8 @@ enum StorageModeError: Error {
             persistence: persistence,
             keyStore: keyStore,
             videoSharePublisher: videoSharePublisher,
-            marmotShareService: marmotShareService
+            marmotShareService: marmotShareService,
+            parentalControlsStore: parentalControlsStore
         )
         let reportCoordinator = ReportCoordinator(
             reportStore: reportStore,
@@ -391,6 +405,8 @@ enum StorageModeError: Error {
             backendClient: backendClient,
             storageConfigurationStore: storageConfigurationStore,
             safetyConfigurationStore: safetyConfigurationStore,
+            parentalControlsStore: parentalControlsStore,
+            videoContentScanner: videoContentScanner,
             managedStorageClient: managedStorageClient,
             byoStorageClient: byoStorageClient,
             backendBaseURL: backendBaseURL,

@@ -16,6 +16,7 @@ final class VideoShareCoordinator {
     private let keyStore: KeychainKeyStore
     private let videoSharePublisher: VideoSharePublisher
     private let marmotShareService: MarmotShareService
+    private let parentalControlsStore: ParentalControlsStore
     private let logger = Logger(subsystem: "com.mytube", category: "VideoShareCoordinator")
     private var contextObserver: NSObjectProtocol?
 
@@ -23,16 +24,24 @@ final class VideoShareCoordinator {
     private var inflightVideoIDs: Set<UUID> = []
     private var cancellables: Set<AnyCancellable> = []
 
+    enum PublishError: Error {
+        case videoMissing
+        case invalidState
+        case parentKeyMissing
+    }
+
     init(
         persistence: PersistenceController,
         keyStore: KeychainKeyStore,
         videoSharePublisher: VideoSharePublisher,
-        marmotShareService: MarmotShareService
+        marmotShareService: MarmotShareService,
+        parentalControlsStore: ParentalControlsStore
     ) {
         self.persistence = persistence
         self.keyStore = keyStore
         self.videoSharePublisher = videoSharePublisher
         self.marmotShareService = marmotShareService
+        self.parentalControlsStore = parentalControlsStore
 
         contextObserver = NotificationCenter.default.addObserver(
             forName: .NSManagedObjectContextDidSave,
@@ -64,19 +73,15 @@ final class VideoShareCoordinator {
     }
 
     private func handleContextSave(_ notification: Notification) async {
-        guard let userInfo = notification.userInfo,
-              let inserted = userInfo[NSInsertedObjectsKey] as? Set<NSManagedObject>,
-              !inserted.isEmpty else {
-            return
-        }
+        guard let userInfo = notification.userInfo else { return }
+        let inserted = userInfo[NSInsertedObjectsKey] as? Set<NSManagedObject> ?? []
+        let updated = userInfo[NSUpdatedObjectsKey] as? Set<NSManagedObject> ?? []
 
-        let videoObjectIDs = inserted
-            .compactMap { object -> NSManagedObjectID? in
-                if let video = object as? VideoEntity {
-                    return video.objectID.isTemporaryID ? nil : video.objectID
-                }
-                return object.entity.name == "Video" ? object.objectID : nil
-            }
+        let videoObjectIDs = Set(
+            inserted
+                .compactMap(videoObjectID(from:)) +
+                updated.compactMap(videoObjectID(from:))
+        )
 
         guard !videoObjectIDs.isEmpty else { return }
 
@@ -89,6 +94,22 @@ final class VideoShareCoordinator {
         do {
             guard let video = try await fetchVideoModel(objectID: objectID) else { return }
             pendingVideoIDs.insert(video.id)
+
+            if video.approvalStatus == .rejected {
+                pendingVideoIDs.remove(video.id)
+                logger.info("Video \(video.id.uuidString, privacy: .public) rejected; skipping share.")
+                return
+            }
+
+            guard video.approvalStatus == .approved else {
+                if parentalControlsStore.requiresVideoApproval {
+                    logger.info("Video \(video.id.uuidString, privacy: .public) awaiting approval (\(video.approvalStatus.rawValue, privacy: .public)).")
+                } else {
+                    logger.info("Skipping share for video \(video.id.uuidString, privacy: .public); status \(video.approvalStatus.rawValue, privacy: .public).")
+                }
+                return
+            }
+
             await share(video: video)
         } catch {
             logger.error("Failed to prepare video share: \(error.localizedDescription, privacy: .public)")
@@ -138,6 +159,10 @@ final class VideoShareCoordinator {
         defer { inflightVideoIDs.remove(video.id) }
 
         do {
+            guard video.approvalStatus == .approved else {
+                logger.info("Share skipped for \(video.id.uuidString, privacy: .public); approval status \(video.approvalStatus.rawValue, privacy: .public)")
+                return
+            }
             guard let parentPair = try keyStore.fetchKeyPair(role: .parent) else {
                 logger.info("Skipping share; parent identity missing.")
                 return
@@ -205,5 +230,69 @@ final class VideoShareCoordinator {
         }
     }
 
+    func publishVideo(_ videoId: UUID) async throws {
+        guard let parentKey = try keyStore.fetchKeyPair(role: .parent)?.publicKeyHex.lowercased() else {
+            throw PublishError.parentKeyMissing
+        }
+
+        let video = try await markVideoAsApproved(videoId: videoId, parentKey: parentKey)
+        pendingVideoIDs.insert(video.id)
+        await share(video: video)
+    }
+
+    func markVideoAsApproved(videoId: UUID, parentKey: String) async throws -> VideoModel {
+        try await withCheckedThrowingContinuation { continuation in
+            persistence.performBackgroundTask { context in
+                do {
+                    let request = VideoEntity.fetchRequest()
+                    request.predicate = NSPredicate(format: "id == %@", videoId as CVarArg)
+                    request.fetchLimit = 1
+                    guard let entity = try context.fetch(request).first else {
+                        continuation.resume(throwing: PublishError.videoMissing)
+                        return
+                    }
+                    guard let current = VideoModel(entity: entity),
+                          current.approvalStatus == .pending else {
+                        continuation.resume(throwing: PublishError.invalidState)
+                        return
+                    }
+
+                    entity.approvalStatus = VideoModel.ApprovalStatus.approved.rawValue
+                    entity.approvedAt = Date()
+                    entity.approvedByParentKey = parentKey
+
+                    try context.save()
+                    guard let updated = VideoModel(entity: entity) else {
+                        continuation.resume(throwing: PublishError.videoMissing)
+                        return
+                    }
+                    continuation.resume(returning: updated)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func videoObjectID(from object: NSManagedObject) -> NSManagedObjectID? {
+        if let video = object as? VideoEntity {
+            return video.objectID.isTemporaryID ? nil : video.objectID
+        }
+        return object.entity.name == "Video" ? object.objectID : nil
+    }
+
     // Follow relationship logic removed - using MDK groups directly
+}
+
+extension VideoShareCoordinator.PublishError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .videoMissing:
+            return "Could not locate the video to publish."
+        case .invalidState:
+            return "This video is not waiting for approval."
+        case .parentKeyMissing:
+            return "Parent identity is missing; add a parent key to approve videos."
+        }
+    }
 }

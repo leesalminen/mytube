@@ -139,11 +139,15 @@ final class ParentZoneViewModel: ObservableObject {
     @Published private(set) var welcomeActionsInFlight: Set<String> = []
     @Published private(set) var groupSummaries: [String: GroupSummary] = [:]
     @Published private(set) var shareStatsByChild: [String: RemoteShareStats] = [:]
+    @Published var requiresVideoApproval: Bool = false
+    @Published var enableContentScanning: Bool = true
+    @Published var pendingApprovalVideos: [VideoModel] = []
 
     private let environment: AppEnvironment
     private let parentAuth: ParentAuth
     private let parentKeyPackageStore: ParentKeyPackageStore
     private let welcomeClient: any WelcomeHandling
+    private let parentalControlsStore: ParentalControlsStore
     private var delegationCache: [UUID: ChildDelegation] = [:]
     private var lastCreatedChildID: UUID?
     private var childKeyLookup: [String: ChildIdentityItem] = [:]
@@ -170,6 +174,7 @@ final class ParentZoneViewModel: ObservableObject {
         self.welcomeClient = welcomeClient ?? environment.mdkActor
         self.pendingParentKeyPackages = environment.parentKeyPackageStore.allPackages()
         self.storageMode = environment.storageModeSelection
+        self.parentalControlsStore = environment.parentalControlsStore
 
         loadStoredBYOConfig()
         backendEndpoint = environment.backendEndpointString()
@@ -195,6 +200,7 @@ final class ParentZoneViewModel: ObservableObject {
             .store(in: &cancellables)
 
         observeMarmotNotifications()
+        loadParentalControls()
     }
 
     deinit {
@@ -317,6 +323,57 @@ final class ParentZoneViewModel: ObservableObject {
             videos = try environment.videoLibrary.fetchVideos(profileId: environment.activeProfile.id, includeHidden: true)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func loadParentalControls() {
+        requiresVideoApproval = parentalControlsStore.requiresVideoApproval
+        enableContentScanning = parentalControlsStore.enableContentScanning || parentalControlsStore.requiresVideoApproval
+    }
+
+    func updateApprovalRequirement(_ enabled: Bool) {
+        parentalControlsStore.setRequiresVideoApproval(enabled)
+        requiresVideoApproval = enabled
+        if enabled {
+            enableContentScanning = true
+        }
+        loadPendingApprovals()
+    }
+
+    func updateContentScanning(_ enabled: Bool) {
+        guard !requiresVideoApproval else {
+            enableContentScanning = true
+            parentalControlsStore.setEnableContentScanning(true)
+            return
+        }
+        enableContentScanning = enabled
+        parentalControlsStore.setEnableContentScanning(enabled)
+    }
+
+    func loadPendingApprovals() {
+        let request = VideoEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "approvalStatus == %@", VideoModel.ApprovalStatus.pending.rawValue)
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \VideoEntity.createdAt, ascending: false)]
+        do {
+            let entities = try environment.persistence.viewContext.fetch(request)
+            pendingApprovalVideos = entities.compactMap(VideoModel.init(entity:))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func refreshPendingApprovals() {
+        loadPendingApprovals()
+    }
+
+    func approvePendingVideo(_ videoId: UUID) {
+        Task {
+            do {
+                try await environment.videoShareCoordinator.publishVideo(videoId)
+                loadPendingApprovals()
+            } catch {
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
         }
     }
 
@@ -591,6 +648,8 @@ final class ParentZoneViewModel: ObservableObject {
         loadRelays()
         loadIdentities()
         loadRelationships()
+        loadParentalControls()
+        loadPendingApprovals()
         loadStoredBYOConfig()
         refreshEntitlement()
         refreshMarmotDiagnostics()
@@ -601,6 +660,7 @@ final class ParentZoneViewModel: ObservableObject {
         Task {
             await linkOrphanedGroups()
             await refreshPendingWelcomes()
+            refreshPendingApprovals()
             await environment.syncCoordinator.refreshSubscriptions()
             print("✅ Async refresh tasks completed")
         }
@@ -840,6 +900,45 @@ final class ParentZoneViewModel: ObservableObject {
     func groupSummary(for child: ChildIdentityItem) -> GroupSummary? {
         guard let groupId = child.profile.mlsGroupId else { return nil }
         return groupSummaries[groupId]
+    }
+    
+    func groupSummaries(for child: ChildIdentityItem) -> [GroupSummary] {
+        print("🔍 Looking for groups for child: '\(child.displayName)'")
+        print("   Total groups available: \(groupSummaries.count)")
+        print("   Total children: \(childIdentities.count)")
+        
+        // If there's only one child profile, show ALL groups (they all belong to this child)
+        if childIdentities.count == 1 {
+            print("   ✅ Single child mode - showing all \(groupSummaries.count) groups")
+            return Array(groupSummaries.values).sorted { $0.name < $1.name }
+        }
+        
+        // Multiple children: try to filter by description or primary group ID
+        for (id, summary) in groupSummaries {
+            print("   Group \(id.prefix(16))...: name='\(summary.name)', desc='\(summary.description)'")
+        }
+        
+        let childName = child.displayName
+        var matchingGroups: [GroupSummary] = []
+        
+        // Include the primary group (if set)
+        if let primaryGroupId = child.profile.mlsGroupId,
+           let primaryGroup = groupSummaries[primaryGroupId] {
+            matchingGroups.append(primaryGroup)
+            print("   ✅ Added primary group: \(primaryGroup.name)")
+        }
+        
+        // Also include groups whose description matches this child's name
+        for summary in groupSummaries.values {
+            if summary.description.contains("Secure sharing for \(childName)"),
+               !matchingGroups.contains(where: { $0.id == summary.id }) {
+                matchingGroups.append(summary)
+                print("   ✅ Added group by description match: \(summary.name)")
+            }
+        }
+        
+        print("   ✅ Found \(matchingGroups.count) matching group(s)")
+        return matchingGroups.sorted { $0.name < $1.name }
     }
 
     func shareStats(for follow: FollowModel) -> RemoteShareStats? {
@@ -1100,34 +1199,14 @@ final class ParentZoneViewModel: ObservableObject {
         keyPackages: [String],
         normalizedParentKey: String
     ) async throws -> String {
-        print("🏗️ inviteParentToGroup: Checking if group exists...")
+        print("🏗️ inviteParentToGroup: Always creating new group for new connection...")
         
-        // Check if group already exists
-        if let existingGroupId = identity.profile.mlsGroupId {
-            print("✅ Group already exists: \(existingGroupId.prefix(16))...")
-            print("📤 Adding \(keyPackages.count) member(s) to existing group...")
-            let relayOverride = await environment.relayDirectory.currentRelayURLs()
-            let request = GroupMembershipCoordinator.AddMembersRequest(
-                mlsGroupId: existingGroupId,
-                keyPackageEventsJson: keyPackages,
-                relayOverride: relayOverride
-            )
-            print("🚀 Calling groupMembershipCoordinator.addMembers...")
-            _ = try await environment.groupMembershipCoordinator.addMembers(request: request)
-            print("✅ Members added successfully")
-            
-            // Refresh the specific group summary
-            await refreshGroupSummariesAsync(mlsGroupId: existingGroupId)
-            
-            // Refresh subscriptions to include newly added members (this triggers notifications)
-            await environment.syncCoordinator.refreshSubscriptions()
-            
-            pendingParentKeyPackages.removeValue(forKey: normalizedParentKey)
-            parentKeyPackageStore.removePackages(forParentKey: normalizedParentKey)
-            return existingGroupId
-        }
+        // Note: Each parent-to-parent connection gets its own group.
+        // Even if this child already has a group with another parent,
+        // we create a new group for this specific connection.
+        // The mlsGroupId on the Profile is just for the "primary" group (legacy field).
         
-        // Group doesn't exist - create it with both parents as members
+        // Create new group with both parents as members
         print("🏗️ Creating new group with remote parent as initial member...")
         let parentIdentity = try ensureParentIdentityLoaded()
         let relays = await environment.relayDirectory.currentRelayURLs()
@@ -1158,9 +1237,15 @@ final class ParentZoneViewModel: ObservableObject {
         let groupId = response.result.group.mlsGroupId
         print("✅ Group created: \(groupId.prefix(16))...")
         
-        print("💾 Updating ProfileStore with groupId...")
-        try environment.profileStore.updateGroupId(groupId, forProfileId: identity.profile.id)
-        print("✅ ProfileStore updated")
+        // Only update the Profile's mlsGroupId if it doesn't already have one
+        // (this keeps the first group as the "primary" group for legacy compatibility)
+        if identity.profile.mlsGroupId == nil {
+            print("💾 Updating ProfileStore with groupId (primary group)...")
+            try environment.profileStore.updateGroupId(groupId, forProfileId: identity.profile.id)
+            print("✅ ProfileStore updated")
+        } else {
+            print("ℹ️ Profile already has primary group \(identity.profile.mlsGroupId?.prefix(16) ?? "?")..., this is an additional group")
+        }
         
         // Update UI on main thread FIRST, before triggering notifications
         print("🔄 Loading identities on MainActor...")

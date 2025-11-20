@@ -570,6 +570,10 @@ struct ParentZoneView: View {
                 .transition(.opacity)
         }
         .background(Color.clear)
+        .onAppear {
+            viewModel.loadParentalControls()
+            viewModel.refreshPendingApprovals()
+        }
         .animation(.easeInOut(duration: 0.2), value: selectedSection)
         .overlay(alignment: .bottom) {
             errorBanner
@@ -857,7 +861,7 @@ private extension ParentZoneView {
     private var connectionsSection: some View {
         // Get all children with groups
         let childrenWithGroups = viewModel.childIdentities.filter { child in
-            viewModel.groupSummary(for: child) != nil
+            !viewModel.groupSummaries(for: child).isEmpty
         }
         
         return insetGroupedList {
@@ -1198,6 +1202,36 @@ private extension ParentZoneView {
                 .padding(.vertical, 4)
             }
 
+            Section("Content Controls") {
+                Toggle("Require Approval Before Sharing", isOn: $viewModel.requiresVideoApproval)
+                    .onChange(of: viewModel.requiresVideoApproval) { newValue in
+                        viewModel.updateApprovalRequirement(newValue)
+                    }
+
+                Toggle("Enable Content Scanning", isOn: Binding(
+                    get: { viewModel.enableContentScanning },
+                    set: { viewModel.updateContentScanning($0) }
+                ))
+                .disabled(viewModel.requiresVideoApproval)
+
+                Text("New videos are scanned for safety and held until a parent approves them when required.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if !viewModel.pendingApprovalVideos.isEmpty {
+                    NavigationLink {
+                        pendingApprovalList
+                    } label: {
+                        HStack {
+                            Text("Pending Approval")
+                            Spacer()
+                            Text("\(viewModel.pendingApprovalVideos.count)")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
             Section("Marmot Diagnostics") {
                 LabeledContent {
                     Text("\(viewModel.marmotDiagnostics.groupCount)")
@@ -1264,6 +1298,63 @@ private extension ParentZoneView {
             }
             .buttonStyle(.bordered)
         }
+    }
+
+    private var pendingApprovalList: some View {
+        List {
+            if viewModel.pendingApprovalVideos.isEmpty {
+                Text("No videos are waiting for approval.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(viewModel.pendingApprovalVideos, id: \.id) { video in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(video.title)
+                            .font(.headline)
+                        HStack(spacing: 12) {
+                            Label(video.createdAt.formatted(date: .abbreviated, time: .omitted), systemImage: "calendar")
+                                .font(.caption)
+                            if let completed = video.scanCompletedAt {
+                                Label("Scanned \(completed, style: .relative)", systemImage: "checkmark.shield")
+                                    .font(.caption)
+                            }
+                        }
+                        .foregroundStyle(.secondary)
+                        if let summary = scanSummary(for: video) {
+                            Text(summary)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Button {
+                            viewModel.approvePendingVideo(video.id)
+                        } label: {
+                            Label("Approve & Publish", systemImage: "paperplane.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(KidPrimaryButtonStyle())
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+        .navigationTitle("Pending Approval")
+        .onAppear {
+            viewModel.refreshPendingApprovals()
+        }
+    }
+
+    private func scanSummary(for video: VideoModel) -> String? {
+        guard let json = video.scanResults,
+              let data = json.data(using: .utf8),
+              let result = try? JSONDecoder().decode(ContentScanResult.self, from: data)
+        else { return nil }
+
+        if result.flaggedReasons.contains("none") {
+            return "Scan passed (\(result.scannedFrameCount) frame(s))."
+        }
+        let reasons = result.flaggedReasons.joined(separator: ", ")
+        let confidence = Int(result.confidence * 100)
+        return "Scan flags: \(reasons) (\(confidence)%)."
     }
 
     @ViewBuilder
@@ -1931,8 +2022,15 @@ private extension ParentZoneView {
             Text(child.displayName)
                 .font(.headline)
             
-            if let summary = viewModel.groupSummary(for: child) {
-                groupSummaryCard(summary: summary)
+            let summaries = viewModel.groupSummaries(for: child)
+            if summaries.isEmpty {
+                Text("No groups")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(summaries, id: \.id) { summary in
+                    groupSummaryCard(summary: summary)
+                }
             }
         }
         .padding(.vertical, 4)
