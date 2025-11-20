@@ -18,20 +18,29 @@ enum VideoLibraryError: Error {
 final class VideoLibrary {
     private let persistence: PersistenceController
     private let storagePaths: StoragePaths
+    private let parentalControlsStore: ParentalControlsStore
+    private let contentScanner: VideoContentScanner
     private let fileManager: FileManager
     private let jsonEncoder = JSONEncoder()
 
     init(
         persistence: PersistenceController,
         storagePaths: StoragePaths,
+        parentalControlsStore: ParentalControlsStore,
+        contentScanner: VideoContentScanner,
         fileManager: FileManager = .default
     ) {
         self.persistence = persistence
         self.storagePaths = storagePaths
+        self.parentalControlsStore = parentalControlsStore
+        self.contentScanner = contentScanner
         self.fileManager = fileManager
     }
 
-    func createVideo(request: VideoCreationRequest) async throws -> VideoModel {
+    func createVideo(
+        request: VideoCreationRequest,
+        progress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> VideoModel {
         let videoId = UUID()
         try storagePaths.ensureProfileContainers(profileId: request.profileId)
 
@@ -49,7 +58,7 @@ final class VideoLibrary {
         try copyItemIfNeeded(from: request.sourceURL, to: videoFileURL)
         try copyItemIfNeeded(from: request.thumbnailURL, to: thumbFileURL)
 
-        return try await performBackground { [self] context in
+        let initialModel = try await performBackground { [self] context in
             let entity = VideoEntity(context: context)
             entity.id = videoId
             entity.profileId = request.profileId
@@ -68,6 +77,11 @@ final class VideoLibrary {
             entity.cvLabelsJSON = self.encodeJSON(request.cvLabels)
             entity.faceCount = Int16(request.faceCount)
             entity.loudness = request.loudness
+            entity.approvalStatus = VideoModel.ApprovalStatus.scanning.rawValue
+            entity.approvedAt = nil
+            entity.approvedByParentKey = nil
+            entity.scanResults = nil
+            entity.scanCompletedAt = nil
 
             try context.save()
 
@@ -76,6 +90,47 @@ final class VideoLibrary {
             }
             return model
         }
+
+        report(progress, message: "Starting content scan…")
+        let scanResult: ContentScanResult?
+        if parentalControlsStore.enableContentScanning {
+            scanResult = await contentScanner.scan(url: videoFileURL, progress: progress)
+        } else {
+            scanResult = nil
+        }
+
+        let updatedModel = try await performBackground { [self] context in
+            guard let entity = try fetchVideo(in: context, id: videoId) else {
+                throw VideoLibraryError.entityMissing
+            }
+
+            if let scanResult {
+                entity.scanResults = try? encodeJSONString(scanResult)
+                entity.scanCompletedAt = Date()
+                entity.approvalStatus = resolveApprovalStatus(for: scanResult).rawValue
+            } else {
+                entity.scanResults = nil
+                entity.scanCompletedAt = Date()
+                entity.approvalStatus = resolveApprovalStatus(for: nil).rawValue
+            }
+
+            if entity.approvalStatus == VideoModel.ApprovalStatus.approved.rawValue {
+                entity.approvedAt = Date()
+            }
+
+            try context.save()
+
+            guard let model = VideoModel(entity: entity) else {
+                throw VideoLibraryError.entityMissing
+            }
+            return model
+        }
+
+        report(progress, message: "Scan complete.")
+        try? FileManager.default.removeItem(at: request.sourceURL)
+        try? FileManager.default.removeItem(at: request.thumbnailURL)
+
+        return updatedModel
     }
 
     func fetchVideos(profileId: UUID, includeHidden: Bool = false) throws -> [VideoModel] {
@@ -319,6 +374,35 @@ final class VideoLibrary {
             create: true
         ).appendingPathComponent("MyTube", isDirectory: true)
         return base?.appendingPathComponent(relativePath) ?? URL(fileURLWithPath: relativePath)
+    }
+
+    private func resolveApprovalStatus(for scanResult: ContentScanResult?) -> VideoModel.ApprovalStatus {
+        if parentalControlsStore.requiresVideoApproval == false {
+            return .approved
+        }
+
+        guard let scanResult else {
+            return .pending
+        }
+
+        if let autoRejectThreshold = parentalControlsStore.autoRejectThreshold,
+           scanResult.confidence < autoRejectThreshold {
+            return .rejected
+        }
+
+        let pendingThreshold = 0.65
+        if scanResult.confidence < pendingThreshold {
+            return .pending
+        }
+
+        return .approved
+    }
+
+    private func report(_ handler: (@Sendable (String) -> Void)?, message: String) {
+        guard let handler else { return }
+        DispatchQueue.main.async {
+            handler(message)
+        }
     }
 }
 

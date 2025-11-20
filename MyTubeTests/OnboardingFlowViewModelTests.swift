@@ -68,7 +68,15 @@ private func makeOnboardingTestEnvironment() throws -> OnboardingTestHarness {
         fileURL: storagePaths.parentKeyPackageCacheURL()
     )
 
-    let videoLibrary = VideoLibrary(persistence: persistence, storagePaths: storagePaths)
+    let userDefaults = UserDefaults(suiteName: "OnboardingFlowViewModelTests.Settings")!
+    let parentalControlsStore = ParentalControlsStore(userDefaults: userDefaults)
+    let videoContentScanner = VideoContentScanner()
+    let videoLibrary = VideoLibrary(
+        persistence: persistence,
+        storagePaths: storagePaths,
+        parentalControlsStore: parentalControlsStore,
+        contentScanner: videoContentScanner
+    )
     let remoteVideoStore = RemoteVideoStore(persistence: persistence)
     let profileStore = ProfileStore(persistence: persistence)
     let thumbnailer = Thumbnailer(storagePaths: storagePaths)
@@ -86,7 +94,6 @@ private func makeOnboardingTestEnvironment() throws -> OnboardingTestHarness {
     )
     let cryptoService = CryptoEnvelopeService()
     let nostrClient = StubNostrClient()
-    let userDefaults = UserDefaults(suiteName: "OnboardingFlowViewModelTests.Settings")!
     let relayDirectory = RelayDirectory(userDefaults: userDefaults)
 
     let parentProfilePublisher = ParentProfilePublisher(
@@ -197,7 +204,8 @@ private func makeOnboardingTestEnvironment() throws -> OnboardingTestHarness {
         persistence: persistence,
         keyStore: keyStore,
         videoSharePublisher: videoSharePublisher,
-        marmotShareService: marmotShareService
+        marmotShareService: marmotShareService,
+        parentalControlsStore: parentalControlsStore
     )
 
     let reportCoordinator = ReportCoordinator(
@@ -257,6 +265,8 @@ private func makeOnboardingTestEnvironment() throws -> OnboardingTestHarness {
         backendClient: backendClient,
         storageConfigurationStore: storageConfigurationStore,
         safetyConfigurationStore: safetyConfigurationStore,
+        parentalControlsStore: parentalControlsStore,
+        videoContentScanner: videoContentScanner,
         managedStorageClient: managedStorageClient,
         byoStorageClient: minioClient,
         backendBaseURL: URL(string: "https://example.com")!,

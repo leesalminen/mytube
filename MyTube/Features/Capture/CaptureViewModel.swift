@@ -21,6 +21,8 @@ final class CaptureViewModel: NSObject, ObservableObject {
     @Published private(set) var isTorchEnabled = false
     @Published private(set) var currentZoomFactor: CGFloat = 1.0
     @Published private(set) var currentCameraPosition: AVCaptureDevice.Position = .back
+    @Published var isScanning = false
+    @Published var scanProgress: String?
 
     let session = AVCaptureSession()
 
@@ -635,6 +637,12 @@ extension CaptureViewModel: AVCaptureFileOutputRecordingDelegate {
 
     private func handleRecordingCompletion(at outputURL: URL) {
         Task {
+            isScanning = true
+            scanProgress = "Preparing scan…"
+            defer {
+                isScanning = false
+                scanProgress = nil
+            }
             let profile = environment.activeProfile
             let asset = AVAsset(url: outputURL)
             let duration = asset.duration.seconds
@@ -653,7 +661,9 @@ extension CaptureViewModel: AVCaptureFileOutputRecordingDelegate {
                     faceCount: 0,
                     loudness: estimateLoudness(for: asset)
                 )
-                _ = try await environment.videoLibrary.createVideo(request: request)
+                _ = try await environment.videoLibrary.createVideo(request: request) { [weak self] progress in
+                    self?.scanProgress = progress
+                }
                 try? FileManager.default.removeItem(at: outputURL)
                 try? FileManager.default.removeItem(at: thumbnailURL)
                 showSavedBanner = true

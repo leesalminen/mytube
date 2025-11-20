@@ -84,6 +84,8 @@ final class EditorDetailViewModel: ObservableObject {
     @Published private(set) var compositionDuration: Double = 0
     @Published private(set) var sourceAspectRatio: CGFloat = 9.0 / 16.0
     @Published private var effectValues: [VideoEffectKind: Float]
+    @Published var isScanning = false
+    @Published var scanProgress: String?
 
     let video: VideoModel
 
@@ -238,6 +240,13 @@ final class EditorDetailViewModel: ObservableObject {
         errorMessage = nil
 
         Task {
+            isScanning = true
+            scanProgress = "Preparing scan…"
+            defer {
+                isExporting = false
+                isScanning = false
+                scanProgress = nil
+            }
             do {
                 let composition = makeComposition()
                 let profileId = environment.activeProfile.id
@@ -264,15 +273,15 @@ final class EditorDetailViewModel: ObservableObject {
                     loudness: video.loudness
                 )
 
-                _ = try await environment.videoLibrary.createVideo(request: request)
+                _ = try await environment.videoLibrary.createVideo(request: request) { [weak self] progress in
+                    self?.scanProgress = progress
+                }
                 try? FileManager.default.removeItem(at: exportedURL)
                 try? FileManager.default.removeItem(at: thumbnailURL)
                 exportSuccess = true
             } catch {
                 errorMessage = error.localizedDescription
             }
-
-            isExporting = false
         }
     }
 

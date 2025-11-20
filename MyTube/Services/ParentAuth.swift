@@ -13,6 +13,7 @@ enum ParentAuthError: Error {
     case pinNotConfigured
     case keychainFailure(OSStatus)
     case biometricUnavailable
+    case invalidPIN
 }
 
 final class ParentAuth {

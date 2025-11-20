@@ -73,6 +73,10 @@ struct EditorDetailView: View {
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
+
+            if viewModel.isScanning {
+                scanningOverlay
+            }
         }
         .foregroundStyle(.white)
         .tint(.accentColor)
@@ -201,6 +205,29 @@ private extension EditorDetailView {
             .disabled(viewModel.isDeleting)
             .buttonStyle(.plain)
         }
+    }
+
+    var scanningOverlay: some View {
+        let palette = appEnvironment.activeProfile.theme.kidPalette
+        return VStack {
+            Spacer()
+            HStack(spacing: 12) {
+                ProgressView()
+                    .tint(palette.accent)
+                Text(viewModel.scanProgress ?? "Scanning export for safety…")
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(palette.cardStroke, lineWidth: 1)
+            )
+            .padding(.bottom, 30)
+        }
+        .transition(.opacity)
     }
 
     var preview: some View {

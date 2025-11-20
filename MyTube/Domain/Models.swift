@@ -59,6 +59,13 @@ extension ProfileModel {
 }
 
 struct VideoModel: Identifiable, Hashable {
+    enum ApprovalStatus: String {
+        case scanning
+        case pending
+        case approved
+        case rejected
+    }
+
     enum Visibility {
         case visible
         case hidden
@@ -83,6 +90,11 @@ struct VideoModel: Identifiable, Hashable {
     var loudness: Double
     var reportedAt: Date?
     var reportReason: String?
+    var approvalStatus: ApprovalStatus
+    var approvedAt: Date?
+    var approvedByParentKey: String?
+    var scanResults: String?
+    var scanCompletedAt: Date?
 
     init(
         id: UUID,
@@ -103,7 +115,12 @@ struct VideoModel: Identifiable, Hashable {
         faceCount: Int,
         loudness: Double,
         reportedAt: Date?,
-        reportReason: String?
+        reportReason: String?,
+        approvalStatus: ApprovalStatus = .approved,
+        approvedAt: Date? = nil,
+        approvedByParentKey: String? = nil,
+        scanResults: String? = nil,
+        scanCompletedAt: Date? = nil
     ) {
         self.id = id
         self.profileId = profileId
@@ -124,6 +141,11 @@ struct VideoModel: Identifiable, Hashable {
         self.loudness = loudness
         self.reportedAt = reportedAt
         self.reportReason = reportReason
+        self.approvalStatus = approvalStatus
+        self.approvedAt = approvedAt
+        self.approvedByParentKey = approvedByParentKey
+        self.scanResults = scanResults
+        self.scanCompletedAt = scanCompletedAt
     }
 
     init?(entity: VideoEntity) {
@@ -157,7 +179,12 @@ struct VideoModel: Identifiable, Hashable {
             faceCount: Int(entity.faceCount),
             loudness: entity.loudness,
             reportedAt: entity.reportedAt,
-            reportReason: entity.reportReason
+            reportReason: entity.reportReason,
+            approvalStatus: ApprovalStatus(rawValue: entity.approvalStatus ?? "approved") ?? .approved,
+            approvedAt: entity.approvedAt,
+            approvedByParentKey: entity.approvedByParentKey,
+            scanResults: entity.scanResults,
+            scanCompletedAt: entity.scanCompletedAt
         )
     }
 
@@ -170,6 +197,10 @@ struct VideoModel: Identifiable, Hashable {
 
     var isReported: Bool {
         reportedAt != nil
+    }
+
+    var needsApproval: Bool {
+        approvalStatus == .pending
     }
 }
 

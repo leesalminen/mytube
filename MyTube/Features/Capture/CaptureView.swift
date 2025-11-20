@@ -43,6 +43,10 @@ struct CaptureView: View {
                     .onTapGesture { viewModel.errorMessage = nil }
             }
 
+            if viewModel.isScanning {
+                scanningOverlay
+            }
+
             if !viewModel.isSessionReady {
                 PreparingOverlay()
             }
@@ -95,6 +99,30 @@ struct CaptureView: View {
             .padding(.bottom, 32)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var scanningOverlay: some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 12) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                Text(viewModel.scanProgress ?? "Scanning for safety…")
+                    .font(.subheadline)
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            )
+            .padding(.bottom, 32)
+        }
+        .transition(.opacity)
     }
 }
 

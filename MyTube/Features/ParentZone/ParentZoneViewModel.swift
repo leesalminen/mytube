@@ -119,8 +119,6 @@ final class ParentZoneViewModel: ObservableObject {
     @Published var childIdentities: [ChildIdentityItem] = []
     @Published var childSecretVisibility: Set<UUID> = []
     @Published private(set) var publishingChildIDs: Set<UUID> = []
-    // Follow relationships removed - using MDK groups directly
-    @Published var followRelationships: [FollowModel] = []  // Deprecated, always empty
     @Published var reports: [ReportModel] = []
     @Published var storageMode: StorageModeSelection = .managed
     @Published var entitlement: CloudEntitlement?
@@ -139,11 +137,15 @@ final class ParentZoneViewModel: ObservableObject {
     @Published private(set) var welcomeActionsInFlight: Set<String> = []
     @Published private(set) var groupSummaries: [String: GroupSummary] = [:]
     @Published private(set) var shareStatsByChild: [String: RemoteShareStats] = [:]
+    @Published var requiresVideoApproval: Bool = false
+    @Published var enableContentScanning: Bool = true
+    @Published var pendingApprovalVideos: [VideoModel] = []
 
     private let environment: AppEnvironment
     private let parentAuth: ParentAuth
     private let parentKeyPackageStore: ParentKeyPackageStore
     private let welcomeClient: any WelcomeHandling
+    private let parentalControlsStore: ParentalControlsStore
     private var delegationCache: [UUID: ChildDelegation] = [:]
     private var lastCreatedChildID: UUID?
     private var childKeyLookup: [String: ChildIdentityItem] = [:]
@@ -170,6 +172,7 @@ final class ParentZoneViewModel: ObservableObject {
         self.welcomeClient = welcomeClient ?? environment.mdkActor
         self.pendingParentKeyPackages = environment.parentKeyPackageStore.allPackages()
         self.storageMode = environment.storageModeSelection
+        self.parentalControlsStore = environment.parentalControlsStore
 
         loadStoredBYOConfig()
         backendEndpoint = environment.backendEndpointString()
@@ -195,6 +198,7 @@ final class ParentZoneViewModel: ObservableObject {
             .store(in: &cancellables)
 
         observeMarmotNotifications()
+        loadParentalControls()
     }
 
     deinit {
@@ -317,6 +321,57 @@ final class ParentZoneViewModel: ObservableObject {
             videos = try environment.videoLibrary.fetchVideos(profileId: environment.activeProfile.id, includeHidden: true)
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func loadParentalControls() {
+        requiresVideoApproval = parentalControlsStore.requiresVideoApproval
+        enableContentScanning = parentalControlsStore.enableContentScanning || parentalControlsStore.requiresVideoApproval
+    }
+
+    func updateApprovalRequirement(_ enabled: Bool) {
+        parentalControlsStore.setRequiresVideoApproval(enabled)
+        requiresVideoApproval = enabled
+        if enabled {
+            enableContentScanning = true
+        }
+        loadPendingApprovals()
+    }
+
+    func updateContentScanning(_ enabled: Bool) {
+        guard !requiresVideoApproval else {
+            enableContentScanning = true
+            parentalControlsStore.setEnableContentScanning(true)
+            return
+        }
+        enableContentScanning = enabled
+        parentalControlsStore.setEnableContentScanning(enabled)
+    }
+
+    func loadPendingApprovals() {
+        let request = VideoEntity.fetchRequest()
+        request.predicate = NSPredicate(format: "approvalStatus == %@", VideoModel.ApprovalStatus.pending.rawValue)
+        request.sortDescriptors = [NSSortDescriptor(keyPath: \VideoEntity.createdAt, ascending: false)]
+        do {
+            let entities = try environment.persistence.viewContext.fetch(request)
+            pendingApprovalVideos = entities.compactMap(VideoModel.init(entity:))
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func refreshPendingApprovals() {
+        loadPendingApprovals()
+    }
+
+    func approvePendingVideo(_ videoId: UUID) {
+        Task {
+            do {
+                try await environment.videoShareCoordinator.publishVideo(videoId)
+                loadPendingApprovals()
+            } catch {
+                errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            }
         }
     }
 
@@ -591,6 +646,8 @@ final class ParentZoneViewModel: ObservableObject {
         loadRelays()
         loadIdentities()
         loadRelationships()
+        loadParentalControls()
+        loadPendingApprovals()
         loadStoredBYOConfig()
         refreshEntitlement()
         refreshMarmotDiagnostics()
@@ -601,6 +658,7 @@ final class ParentZoneViewModel: ObservableObject {
         Task {
             await linkOrphanedGroups()
             await refreshPendingWelcomes()
+            refreshPendingApprovals()
             await environment.syncCoordinator.refreshSubscriptions()
             print("✅ Async refresh tasks completed")
         }
@@ -800,52 +858,15 @@ final class ParentZoneViewModel: ObservableObject {
         }
     }
 
-    func loadRelationships() {
-        // Relationship store removed - using MDK groups directly
-    }
-
     func refreshConnections() {
         Task {
             await environment.syncCoordinator.refreshSubscriptions()
-            // Relationship store removed - MDK groups refreshed via marmotStateDidChange
         }
-    }
-
-    func incomingFollowRequests() -> [FollowModel] {
-        followRelationships.filter { follow in
-            guard targetProfile(for: follow) != nil else { return false }
-            return !follow.approvedTo && follow.status != .revoked && follow.status != .blocked
-        }
-    }
-
-    func outgoingFollowRequests() -> [FollowModel] {
-        followRelationships.filter { follow in
-            guard followerProfile(for: follow) != nil else { return false }
-            return follow.approvedFrom && !follow.approvedTo && follow.status != .revoked && follow.status != .blocked
-        }
-    }
-
-    func activeFollowConnections() -> [FollowModel] {
-        followRelationships.filter { follow in
-            guard follow.isFullyApproved else { return false }
-            return followerProfile(for: follow) != nil || targetProfile(for: follow) != nil
-        }
-    }
-
-    func groupSummary(for follow: FollowModel) -> GroupSummary? {
-        guard let groupId = resolvedGroupId(for: follow) else { return nil }
-        return groupSummaries[groupId]
     }
 
     func groupSummary(for child: ChildIdentityItem) -> GroupSummary? {
         guard let groupId = child.profile.mlsGroupId else { return nil }
         return groupSummaries[groupId]
-    }
-
-    func shareStats(for follow: FollowModel) -> RemoteShareStats? {
-        guard follow.status == .active else { return nil }
-        guard let key = remoteChildKey(for: follow) else { return nil }
-        return shareStatsByChild[key]
     }
 
     func totalAvailableRemoteShares() -> Int {
@@ -892,148 +913,6 @@ final class ParentZoneViewModel: ObservableObject {
                 }
             }
         }
-    }
-
-    func unblockFamily(for follow: FollowModel) {
-        Task {
-            guard
-                let remoteKeyValue = remoteParentKey(for: follow),
-                let remoteParent = ParentIdentityKey(string: remoteKeyValue)
-            else {
-                await MainActor.run {
-                    self.errorMessage = "Could not determine remote parent key to unblock."
-                }
-                return
-            }
-
-            do {
-                try await removeParentFromGroup(
-                    follow: follow,
-                    remoteParent: remoteParent,
-                    newStatus: .revoked
-                )
-                await MainActor.run {
-                    self.errorMessage = nil
-                }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = error.localizedDescription
-                }
-                refreshRelaysOnConnectivityError(error)
-            }
-        }
-    }
-
-    func approvedParentKeys(forChild childId: UUID) -> [String] {
-        guard let parentIdentity else { return [] }
-        let localParentHex = parentIdentity.publicKeyHex.lowercased()
-        let localVariants = localParentKeyVariants
-
-        guard let childItem = childIdentities.first(where: { $0.id == childId }),
-              let childIdentity = childItem.identity else {
-            return []
-        }
-
-        let childVariants = Set(normalizedKeyVariants(childIdentity.publicKeyHex))
-        var keys: Set<String> = []
-
-        for follow in followRelationships where follow.isFullyApproved {
-            let followerVariants = Set(normalizedKeyVariants(follow.followerChild))
-            let targetVariants = Set(normalizedKeyVariants(follow.targetChild))
-
-            guard !childVariants.isDisjoint(with: followerVariants) || !childVariants.isDisjoint(with: targetVariants) else {
-                continue
-            }
-
-            var remoteParents = follow.remoteParentKeys(localParentHex: localParentHex)
-            if remoteParents.isEmpty, let fallback = ParentIdentityKey(string: follow.lastMessage?.by ?? "")?.hex.lowercased() {
-                remoteParents = [fallback]
-            }
-
-            for key in remoteParents where !key.isEmpty {
-                let lower = key.lowercased()
-                guard !localVariants.contains(lower) else { continue }
-                keys.insert(lower)
-            }
-        }
-
-        return keys.sorted()
-    }
-
-    private func followRelationship(
-        for childId: UUID,
-        childIdentity: ChildIdentity,
-        remoteParent: ParentIdentityKey,
-        localParentHex: String
-    ) -> FollowModel? {
-        let childVariants = Set(normalizedKeyVariants(childIdentity.publicKeyHex))
-        let remoteHex = remoteParent.hex.lowercased()
-
-        for follow in followRelationships where follow.isFullyApproved {
-            let followerVariants = Set(normalizedKeyVariants(follow.followerChild))
-            let targetVariants = Set(normalizedKeyVariants(follow.targetChild))
-            guard !childVariants.isDisjoint(with: followerVariants) || !childVariants.isDisjoint(with: targetVariants) else {
-                continue
-            }
-            let remoteParents = follow.remoteParentKeys(localParentHex: localParentHex)
-            if remoteParents.contains(where: { $0.caseInsensitiveCompare(remoteHex) == .orderedSame }) {
-                return follow
-            }
-        }
-        return nil
-    }
-
-    func isApprovedParent(_ key: String, forChild childId: UUID) -> Bool {
-        guard let scanned = ParentIdentityKey(string: key) else { return false }
-        return approvedParentKeys(forChild: childId).contains {
-            $0.caseInsensitiveCompare(scanned.hex) == .orderedSame
-        }
-    }
-
-    func followerProfile(for follow: FollowModel) -> ChildIdentityItem? {
-        childItem(forKey: follow.followerChild)
-    }
-
-    func targetProfile(for follow: FollowModel) -> ChildIdentityItem? {
-        childItem(forKey: follow.targetChild)
-    }
-
-    func remoteParentKey(for follow: FollowModel) -> String? {
-        guard let parentIdentity,
-              let remoteHex = follow.remoteParentKeys(localParentHex: parentIdentity.publicKeyHex).first else {
-            guard let fallback = follow.lastMessage?.by else { return nil }
-            return localParentKeyVariants.contains(fallback.lowercased()) ? nil : fallback
-        }
-        return ParentIdentityKey(string: remoteHex)?.displayValue ?? remoteHex
-    }
-
-    func childDeviceInvite(for child: ChildIdentityItem) -> ChildDeviceInvite? {
-        guard let identity = child.identity,
-              let secret = child.secretKey,
-              let parentIdentity = try? ensureParentIdentityLoaded()
-        else { return nil }
-
-        let parentKey = parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex
-        let childKey = identity.publicKeyBech32 ?? identity.keyPair.publicKeyHex
-
-        var delegationPayload: ChildDeviceInvite.DelegationPayload?
-        if let delegation = child.delegation {
-            delegationPayload = ChildDeviceInvite.DelegationPayload(
-                delegator: delegation.delegatorPublicKey,
-                delegatee: delegation.delegateePublicKey,
-                conditions: delegation.conditions.encode(),
-                signature: delegation.signature
-            )
-        }
-
-        return ChildDeviceInvite(
-            version: 1,
-            childName: child.displayName,
-            childPublicKey: childKey,
-            childSecretKey: secret,
-            parentPublicKey: parentKey,
-            delegation: delegationPayload
-        )
     }
 
     func followInvite(for child: ChildIdentityItem) -> FollowInvite? {
@@ -1185,276 +1064,6 @@ final class ParentZoneViewModel: ObservableObject {
         return groupId
     }
 
-    private func recordFollowUpdate(
-        followerChild: String,
-        targetChild: String,
-        approvedFrom: Bool,
-        approvedTo: Bool,
-        status: FollowModel.Status,
-        actorKey: String,
-        participantKeys: [String],
-        mlsGroupId: String?
-    ) throws {
-        // Follow relationships deprecated - using MDK groups directly
-        // This method is a no-op now
-    }
-
-    private func resolvedGroupId(for follow: FollowModel) -> String? {
-        if let stored = follow.mlsGroupId, !stored.isEmpty {
-            return stored
-        }
-        if let follower = followerProfile(for: follow)?.profile.mlsGroupId {
-            return follower
-        }
-        if let target = targetProfile(for: follow)?.profile.mlsGroupId {
-            return target
-        }
-        return nil
-    }
-
-    private func removeParentFromGroup(
-        follow: FollowModel,
-        remoteParent: ParentIdentityKey,
-        newStatus: FollowModel.Status
-    ) async throws {
-        let parentIdentity = try ensureParentIdentityLoaded()
-        guard let groupId = resolvedGroupId(for: follow) else {
-            throw GroupMembershipWorkflowError.groupIdentifierMissing
-        }
-        let relayOverride = await environment.relayDirectory.currentRelayURLs()
-        let request = GroupMembershipCoordinator.RemoveMembersRequest(
-            mlsGroupId: groupId,
-            memberPublicKeys: [remoteParent.hex.lowercased()],
-            relayOverride: relayOverride.isEmpty ? nil : relayOverride
-        )
-        _ = try await environment.groupMembershipCoordinator.removeMembers(request: request)
-        try recordFollowUpdate(
-            followerChild: follow.followerChild,
-            targetChild: follow.targetChild,
-            approvedFrom: false,
-            approvedTo: false,
-            status: newStatus,
-            actorKey: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex,
-            participantKeys: [remoteParent.displayValue],
-            mlsGroupId: groupId
-        )
-        loadRelationships()
-    }
-
-    @discardableResult
-    func submitFollowRequest(
-        childId: UUID,
-        targetChildKey: String,
-        targetParentKey: String
-    ) async -> String? {
-        let trimmedTargetChild = targetChildKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedTargetParent = targetParentKey.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !trimmedTargetChild.isEmpty else {
-            let message = "Enter the other child's public key."
-            errorMessage = message
-            return message
-        }
-        guard !trimmedTargetParent.isEmpty else {
-            let message = "Enter the other parent's public key."
-            errorMessage = message
-            return message
-        }
-        guard let followerItem = childIdentities.first(where: { $0.id == childId }) else {
-            let message = "Select a local child profile."
-            errorMessage = message
-            return message
-        }
-        guard let followerIdentity = followerItem.identity else {
-            let message = "Generate a key for \(followerItem.displayName) before sending invites."
-            errorMessage = message
-            return message
-        }
-        guard isValidParentKey(trimmedTargetParent) else {
-            let message = "Enter a valid parent public key (npub… or 64-char hex)."
-            errorMessage = message
-            return message
-        }
-
-        let localIdentity: ParentIdentity
-        do {
-            localIdentity = try ensureParentIdentityLoaded()
-        } catch {
-            let message = "Generate or import your parent key before sending follow requests."
-            errorMessage = message
-            return message
-        }
-
-        guard ParentIdentityKey(string: localIdentity.publicKeyBech32 ?? localIdentity.publicKeyHex) != nil else {
-            let message = "Parent identity is malformed. Recreate your parent key and try again."
-            errorMessage = message
-            return message
-        }
-        guard let remoteParentKey = ParentIdentityKey(string: trimmedTargetParent) else {
-            let message = "Enter a valid parent public key (npub… or 64-char hex)."
-            errorMessage = message
-            return message
-        }
-
-        let normalizedRemoteParent = remoteParentKey.hex.lowercased()
-        print("🔍 Looking up key packages for parent: \(normalizedRemoteParent.prefix(16))...")
-        print("   Pending packages keys: \(Array(pendingParentKeyPackages.keys).map { $0.prefix(16) })")
-        guard let keyPackages = pendingParentKeyPackages[normalizedRemoteParent], !keyPackages.isEmpty else {
-            let message = GroupMembershipWorkflowError.keyPackageMissing.errorDescription ?? "Scan the other parent's Marmot invite before sending a request."
-            print("❌ Key packages not found!")
-            errorMessage = message
-            return message
-        }
-        print("✅ Found \(keyPackages.count) key package(s)")
-        for (i, pkg) in keyPackages.enumerated() {
-            print("   Package [\(i)] length: \(pkg.count)")
-        }
-
-        let groupId: String
-        do {
-            print("🎯 Calling inviteParentToGroup...")
-            groupId = try await inviteParentToGroup(
-                child: followerItem,
-                identity: followerIdentity,
-                keyPackages: keyPackages,
-                normalizedParentKey: normalizedRemoteParent
-            )
-        } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            errorMessage = message
-            return message
-        }
-
-        do {
-            try recordFollowUpdate(
-                followerChild: followerIdentity.keyPair.publicKeyHex,
-                targetChild: trimmedTargetChild,
-                approvedFrom: true,
-                approvedTo: false,
-                status: .pending,
-                actorKey: localIdentity.publicKeyBech32 ?? localIdentity.publicKeyHex,
-                participantKeys: [remoteParentKey.displayValue],
-                mlsGroupId: groupId
-            )
-            errorMessage = nil
-            loadIdentities()
-            loadRelationships()
-            Task {
-                await environment.syncCoordinator.refreshSubscriptions()
-            }
-            return nil
-        } catch {
-            logger.error("Failed to record follow after MDK invite: \(error.localizedDescription, privacy: .public)")
-            let message = error.localizedDescription
-            errorMessage = message
-            return message
-        }
-    }
-
-    @discardableResult
-    func approveFollow(_ follow: FollowModel) async -> String? {
-        guard let profileItem = targetProfile(for: follow) else {
-            let message = "This follow request is not for one of your child profiles."
-            errorMessage = message
-            return message
-        }
-        guard let identity = profileItem.identity else {
-            let message = "Generate a key for \(profileItem.displayName) before approving."
-            errorMessage = message
-            return message
-        }
-        let parentIdentity: ParentIdentity
-        do {
-            parentIdentity = try ensureParentIdentityLoaded()
-        } catch {
-            let message = error.localizedDescription
-            errorMessage = message
-            return message
-        }
-        guard let remoteParentValue = remoteParentKey(for: follow),
-              let remoteParentKey = ParentIdentityKey(string: remoteParentValue) else {
-            let message = "Could not determine the other parent's key for this request."
-            errorMessage = message
-            return message
-        }
-        let normalizedRemoteParent = remoteParentKey.hex.lowercased()
-        guard let keyPackages = pendingParentKeyPackages[normalizedRemoteParent], !keyPackages.isEmpty else {
-            let message = GroupMembershipWorkflowError.keyPackageMissing.errorDescription
-                ?? "Scan the other parent's Marmot invite before approving."
-            errorMessage = message
-            return message
-        }
-
-        let groupId: String
-        do {
-            groupId = try await inviteParentToGroup(
-                child: profileItem,
-                identity: identity,
-                keyPackages: keyPackages,
-                normalizedParentKey: normalizedRemoteParent
-            )
-        } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            errorMessage = message
-            return message
-        }
-
-        let status: FollowModel.Status = follow.approvedFrom ? .active : .pending
-        do {
-            try recordFollowUpdate(
-                followerChild: follow.followerChild,
-                targetChild: follow.targetChild,
-                approvedFrom: follow.approvedFrom,
-                approvedTo: true,
-                status: status,
-                actorKey: parentIdentity.publicKeyBech32 ?? parentIdentity.publicKeyHex,
-                participantKeys: [remoteParentKey.displayValue],
-                mlsGroupId: groupId
-            )
-            errorMessage = nil
-            loadIdentities()
-            loadRelationships()
-            Task {
-                await environment.syncCoordinator.refreshSubscriptions()
-            }
-            return nil
-        } catch {
-            logger.error("Failed to record follow approval: \(error.localizedDescription, privacy: .public)")
-            let message = error.localizedDescription
-            errorMessage = message
-            return message
-        }
-    }
-
-    @discardableResult
-    func revokeFollow(_ follow: FollowModel, remoteParentKey: String) async -> String? {
-        let trimmed = remoteParentKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            let message = "Enter the parent's key to revoke."
-            errorMessage = message
-            return message
-        }
-
-        do {
-            guard let remoteParent = ParentIdentityKey(string: trimmed) else {
-                let message = "Enter the parent's key to revoke."
-                errorMessage = message
-                return message
-            }
-            try await removeParentFromGroup(
-                follow: follow,
-                remoteParent: remoteParent,
-                newStatus: .revoked
-            )
-            errorMessage = nil
-            return nil
-        } catch {
-            refreshRelaysOnConnectivityError(error)
-            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            errorMessage = message
-            return message
-        }
-    }
 
     func addChildProfile(name: String, theme: ThemeDescriptor) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1632,7 +1241,6 @@ final class ParentZoneViewModel: ObservableObject {
                 self.childIdentities = []
                 self.childSecretVisibility.removeAll()
                 self.delegationCache.removeAll()
-                self.followRelationships = []
                 self.childKeyLookup.removeAll()
                 self.localParentKeyVariants.removeAll()
                 self.pendingWelcomes = []
@@ -1730,8 +1338,6 @@ final class ParentZoneViewModel: ObservableObject {
     private func handleAcceptedWelcome(_ welcome: Welcome, linkToChildId: UUID?) async {
         print("🎉 handleAcceptedWelcome called for group: \(welcome.mlsGroupId.prefix(16))...")
         print("   Group name: \(welcome.groupName)")
-        
-        approvePendingFollows(for: welcome)
         
         // Link to specified child, or try auto-matching by name
         if let childId = linkToChildId {
@@ -2013,12 +1619,6 @@ final class ParentZoneViewModel: ObservableObject {
         }
     }
 
-    private func approvePendingFollows(for welcome: Welcome) {
-        // Follow relationships removed - group membership is tracked in MDK
-        // When a welcome is accepted, the user is automatically added to the group
-        // No need to update separate follow state
-        logger.info("Accepted welcome for group \(welcome.mlsGroupId, privacy: .public) - membership now in MDK")
-    }
 
     private func notifyPendingWelcomeChange() {
         NotificationCenter.default.post(name: .marmotPendingWelcomesDidChange, object: nil)
@@ -2063,17 +1663,6 @@ final class ParentZoneViewModel: ObservableObject {
         return nil
     }
 
-    private func remoteChildKey(for follow: FollowModel) -> String? {
-        if childItem(forKey: follow.followerChild) != nil {
-            return canonicalChildKey(follow.targetChild) ?? follow.targetChild.lowercased()
-        }
-        if childItem(forKey: follow.targetChild) != nil {
-            return canonicalChildKey(follow.followerChild) ?? follow.followerChild.lowercased()
-        }
-        return canonicalChildKey(follow.targetChild) ??
-            canonicalChildKey(follow.followerChild) ??
-            follow.targetChild.lowercased()
-    }
 
     func isValidParentKey(_ key: String) -> Bool {
         ParentIdentityKey(string: key) != nil
@@ -2204,15 +1793,6 @@ final class ParentZoneViewModel: ObservableObject {
         ParentIdentityKey(string: value)?.hex.lowercased()
     }
 
-    private func upsertFollow(_ model: FollowModel) {
-        if let index = followRelationships.firstIndex(where: { $0.id == model.id }) {
-            followRelationships[index] = model
-        } else {
-            followRelationships.append(model)
-        }
-        followRelationships.sort { $0.updatedAt > $1.updatedAt }
-    }
-
     struct CloudEntitlement: Equatable {
         let plan: String
         let status: String
@@ -2313,88 +1893,10 @@ final class ParentZoneViewModel: ObservableObject {
         }
     }
 
-    struct ChildDeviceInvite: Codable, Sendable, Equatable {
-        struct DelegationPayload: Codable, Sendable, Equatable {
-            let delegator: String
-            let delegatee: String
-            let conditions: String
-            let signature: String
-        }
-
-        let version: Int
-        let childName: String
-        let childPublicKey: String
-        let childSecretKey: String
-        let parentPublicKey: String
-        let delegation: DelegationPayload?
-
-        var encodedURL: String? {
-            guard let data = try? JSONEncoder().encode(self) else {
-                return nil
-            }
-            let base = data.base64EncodedString()
-            var components = URLComponents()
-            components.scheme = "mytube"
-            components.host = "child-invite"
-            components.queryItems = [
-                URLQueryItem(name: "v", value: "\(version)"),
-                URLQueryItem(name: "data", value: base)
-            ]
-            return components.url?.absoluteString
-        }
-
-        var shareText: String {
-            """
-            MyTube Child Device Invite: \(childName)
-            Parent: \(parentPublicKey)
-            Child: \(childPublicKey)
-
-            Scan the QR or open the link below on the destination device:
-            \(encodedURL ?? "")
-            """
-        }
-
-        var shareItems: [Any] {
-            var items: [Any] = []
-            items.append(shareText)
-            if let urlString = encodedURL, let url = URL(string: urlString) {
-                items.append(url)
-            } else if let urlString = encodedURL {
-                items.append(urlString)
-            }
-            return items
-        }
-
-        static func decode(from string: String) -> ChildDeviceInvite? {
-            if let invite = decodeURLString(string) {
-                return invite
-            }
-            let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ",;|<>\"'()[]{}"))
-            let tokens = string.components(separatedBy: separators)
-            for token in tokens {
-                if let invite = decodeURLString(token) {
-                    return invite
-                }
-            }
-            return nil
-        }
-
-        private static func decodeURLString(_ string: String) -> ChildDeviceInvite? {
-            guard let url = URL(string: string),
-                  url.scheme?.caseInsensitiveCompare("mytube") == .orderedSame,
-                  url.host?.caseInsensitiveCompare("child-invite") == .orderedSame,
-                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                  let dataParam = components.queryItems?.first(where: { $0.name == "data" })?.value,
-                  let decodedData = Data(base64Encoded: dataParam)
-            else { return nil }
-            return try? JSONDecoder().decode(ChildDeviceInvite.self, from: decodedData)
-        }
-    }
-
     struct FollowInvite: Codable, Sendable, Equatable {
         let version: Int
         let childName: String?
-        let childPublicKey: String  // Now contains profile ID instead of pubkey
+        let childPublicKey: String
         let parentPublicKey: String
         let parentKeyPackages: [String]?
 
@@ -2404,7 +1906,7 @@ final class ParentZoneViewModel: ObservableObject {
             }
             let base = data.base64EncodedString()
             var components = URLComponents()
-            components.scheme = "mytube"
+            components.scheme = "tubestr"
             components.host = "follow-invite"
             components.queryItems = [
                 URLQueryItem(name: "v", value: "\(version)"),
@@ -2414,24 +1916,21 @@ final class ParentZoneViewModel: ObservableObject {
         }
 
         var shareText: String {
-            let nameDescriptor = childName.map { " (\($0))" } ?? ""
+            let nameDescriptor = childName.map { " for \($0)" } ?? ""
             return """
-            MyTube Follow Invite\(nameDescriptor)
-            Parent: \(parentPublicKey)
-            Profile: \(childPublicKey)
-
-            Scan the QR or open the link below on the other parent's device:
+            Tubestr Family Invite\(nameDescriptor)
+            
+            Open this link to connect:
             \(encodedURL ?? "")
             """
         }
 
         var shareItems: [Any] {
-            var items: [Any] = [shareText]
+            var items: [Any] = []
             if let urlString = encodedURL, let url = URL(string: urlString) {
                 items.append(url)
-            } else if let urlString = encodedURL {
-                items.append(urlString)
             }
+            items.append(shareText)
             return items
         }
 
@@ -2439,43 +1938,12 @@ final class ParentZoneViewModel: ObservableObject {
             if let invite = decodeURLString(string) {
                 return invite
             }
-
-            let normalized = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalized.isEmpty else { return nil }
-
-            let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ",;|&"))
-            let tokens = normalized.components(separatedBy: separators).filter { !$0.isEmpty }
-            var parentValue: String?
-            var childValue: String?
-
-            for token in tokens {
-                let parts = token.split(separator: "=", maxSplits: 1).map(String.init)
-                guard parts.count == 2 else { continue }
-                let key = parts[0].lowercased()
-                let value = parts[1]
-                if key == "parent" || key == "parentnpub" {
-                    parentValue = value
-                } else if key == "child" || key == "childnpub" {
-                    childValue = value
-                }
-            }
-
-            if let parentValue, let childValue {
-                return FollowInvite(
-                    version: 1,
-                    childName: nil,
-                    childPublicKey: childValue,
-                    parentPublicKey: parentValue,
-                    parentKeyPackages: nil
-                )
-            }
-
             return nil
         }
 
         private static func decodeURLString(_ string: String) -> FollowInvite? {
             guard let url = URL(string: string),
-                  url.scheme?.caseInsensitiveCompare("mytube") == .orderedSame,
+                  url.scheme?.caseInsensitiveCompare("tubestr") == .orderedSame,
                   url.host?.caseInsensitiveCompare("follow-invite") == .orderedSame,
                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   let dataParam = components.queryItems?.first(where: { $0.name == "data" })?.value,

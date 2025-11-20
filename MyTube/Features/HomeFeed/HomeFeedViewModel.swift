@@ -29,9 +29,11 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     @Published var presentedRemoteVideo: SharedRemoteVideo?
     @Published private(set) var error: String?
     @Published private(set) var remoteShareSummary: RemoteShareSummary = .empty
+    @Published var publishingVideoIds: Set<UUID> = []
 
     private weak var environment: AppEnvironment?
     private var profile: ProfileModel?
+    private var parentalControlsStore: ParentalControlsStore?
     private var fetchedResultsController: NSFetchedResultsController<VideoEntity>?
     private var remoteFetchedResultsController: NSFetchedResultsController<RemoteVideoEntity>?
     private var keepAliveTask: Task<Void, Never>?
@@ -40,6 +42,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
     func bind(to environment: AppEnvironment) {
         guard self.environment == nil else { return }
         self.environment = environment
+        self.parentalControlsStore = environment.parentalControlsStore
         observeProfileChanges(environment)
         environment.childProfileStore.objectWillChange
             .receive(on: RunLoop.main)
@@ -142,7 +145,7 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         }
 
         let baseVideos = entities.compactMap(VideoModel.init(entity:))
-        let videos = baseVideos
+        let videos = baseVideos.filter { $0.approvalStatus != .rejected }
         let rankingState = (try? environment.videoLibrary.fetchRankingState(profileId: profile.id)) ?? RankingStateModel(profileId: profile.id, topicSuccess: [:], exploreRate: 0.15)
         let result = environment.rankingEngine.rank(videos: videos, rankingState: rankingState)
         hero = result.hero
@@ -429,6 +432,18 @@ final class HomeFeedViewModel: NSObject, ObservableObject {
         updateSharedVideos()
         
         print("✅ HomeFeed.refresh() completed")
+    }
+
+    func publishVideo(_ videoId: UUID, pin: String) async throws {
+        guard let environment else { return }
+        guard try environment.parentAuth.validate(pin: pin) else {
+            throw ParentAuthError.invalidPIN
+        }
+
+        publishingVideoIds.insert(videoId)
+        defer { publishingVideoIds.remove(videoId) }
+
+        try await environment.videoShareCoordinator.publishVideo(videoId)
     }
 
     private var cancellables: Set<AnyCancellable> = []
