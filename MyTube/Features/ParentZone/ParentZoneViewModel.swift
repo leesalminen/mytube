@@ -2419,7 +2419,7 @@ final class ParentZoneViewModel: ObservableObject {
             }
             let base = data.base64EncodedString()
             var components = URLComponents()
-            components.scheme = "mytube"
+            components.scheme = "tubestr"
             components.host = "child-invite"
             components.queryItems = [
                 URLQueryItem(name: "v", value: "\(version)"),
@@ -2430,11 +2430,11 @@ final class ParentZoneViewModel: ObservableObject {
 
         var shareText: String {
             """
-            MyTube Child Device Invite: \(childName)
+            Tubestr Child Device Invite: \(childName)
             Parent: \(parentPublicKey)
             Child: \(childPublicKey)
 
-            Scan the QR or open the link below on the destination device:
+            Open the link below on the destination device:
             \(encodedURL ?? "")
             """
         }
@@ -2466,7 +2466,7 @@ final class ParentZoneViewModel: ObservableObject {
 
         private static func decodeURLString(_ string: String) -> ChildDeviceInvite? {
             guard let url = URL(string: string),
-                  url.scheme?.caseInsensitiveCompare("mytube") == .orderedSame,
+                  (url.scheme?.caseInsensitiveCompare("tubestr") == .orderedSame || url.scheme?.caseInsensitiveCompare("mytube") == .orderedSame),
                   url.host?.caseInsensitiveCompare("child-invite") == .orderedSame,
                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   let dataParam = components.queryItems?.first(where: { $0.name == "data" })?.value,
@@ -2489,7 +2489,7 @@ final class ParentZoneViewModel: ObservableObject {
             }
             let base = data.base64EncodedString()
             var components = URLComponents()
-            components.scheme = "mytube"
+            components.scheme = "tubestr"
             components.host = "follow-invite"
             components.queryItems = [
                 URLQueryItem(name: "v", value: "\(version)"),
@@ -2501,11 +2501,11 @@ final class ParentZoneViewModel: ObservableObject {
         var shareText: String {
             let nameDescriptor = childName.map { " (\($0))" } ?? ""
             return """
-            MyTube Follow Invite\(nameDescriptor)
+            Tubestr Family Invite\(nameDescriptor)
             Parent: \(parentPublicKey)
             Profile: \(childPublicKey)
 
-            Scan the QR or open the link below on the other parent's device:
+            Open the link below on the other parent's device:
             \(encodedURL ?? "")
             """
         }
@@ -2560,7 +2560,7 @@ final class ParentZoneViewModel: ObservableObject {
 
         private static func decodeURLString(_ string: String) -> FollowInvite? {
             guard let url = URL(string: string),
-                  url.scheme?.caseInsensitiveCompare("mytube") == .orderedSame,
+                  (url.scheme?.caseInsensitiveCompare("tubestr") == .orderedSame || url.scheme?.caseInsensitiveCompare("mytube") == .orderedSame),
                   url.host?.caseInsensitiveCompare("follow-invite") == .orderedSame,
                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   let dataParam = components.queryItems?.first(where: { $0.name == "data" })?.value,

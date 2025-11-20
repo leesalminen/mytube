@@ -221,31 +221,6 @@ struct ParentZoneView: View {
                         }
                     }
 
-                    Section("Share this invite with the other parent") {
-                        if let childId = followChildSelection,
-                           let child = viewModel.childIdentities.first(where: { $0.id == childId }),
-                           let invite = viewModel.followInvite(for: child) {
-                            let summary = "Parent: \(shortKey(invite.parentPublicKey))\nChild: \(shortKey(invite.childPublicKey))"
-                            Text("Copy or scan once so the other parent gets both keys and your Marmot key package.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            QRCodeCard(
-                                title: "\(child.displayName) Marmot Invite",
-                                content: .text(label: "Includes both keys", value: summary),
-                                footer: "Share this exact invite so the group connects in one step.",
-                                copyAction: { copyToPasteboard(invite.encodedURL ?? invite.shareText) },
-                                toggleSecure: nil,
-                                qrValue: invite.encodedURL,
-                                showsShareButton: true,
-                                shareAction: { presentShare(invite.shareItems) }
-                            )
-                        } else {
-                            Text("Select a child to generate their Marmot invite. We package your key automatically so the other parent can't miss it.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
                     Section("Connect using an invite") {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Paste the Marmot invite link or scan the QR from the other parent. We auto-fill both keys and keep their Marmot key package so approval works in one step.")
@@ -287,50 +262,6 @@ struct ParentZoneView: View {
                                 )
                                 .foregroundStyle(.green)
                                 .font(.footnote)
-                            }
-
-                            DisclosureGroup("Enter keys manually (fallback)") {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack {
-                                        TextField("Friend's child npub or hex", text: $followTargetChildKey)
-                                            .textInputAutocapitalization(.never)
-                                            .autocorrectionDisabled()
-                                            .font(.system(.footnote).monospaced())
-                                            .disabled(followIsSubmitting)
-                                        Button {
-                                            qrIntent = .followChild
-                                        } label: {
-                                            Label("Scan child key", systemImage: "qrcode.viewfinder")
-                                                .labelStyle(.iconOnly)
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.small)
-                                        .disabled(followIsSubmitting)
-                                        .accessibilityLabel("Scan friend child key QR")
-                                    }
-
-                                    HStack {
-                                        TextField("Friend's parent npub or hex", text: $followTargetParentKey)
-                                            .textInputAutocapitalization(.never)
-                                            .autocorrectionDisabled()
-                                            .font(.system(.footnote).monospaced())
-                                            .disabled(followIsSubmitting)
-                                        Button {
-                                            qrIntent = .followParent
-                                        } label: {
-                                            Label("Scan parent key", systemImage: "qrcode.viewfinder")
-                                                .labelStyle(.iconOnly)
-                                        }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.small)
-                                        .disabled(followIsSubmitting)
-                                        .accessibilityLabel("Scan friend parent key QR")
-                                    }
-
-                                    Text("Use manual entry only if the invite link is unavailable. Sharing the invite is the most reliable path because it includes the Marmot key package.")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
                             }
                         }
                     }
@@ -1506,31 +1437,41 @@ private extension ParentZoneView {
 
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 16) {
-                QRCodeCard(
-                    title: "Parent Public Key",
-                    content: .text(label: "Parent npub", value: parentPublic),
-                    footer: "Share with trusted parents so your kids can link families.",
-                    copyAction: { copyToPasteboard(parentPublic) },
-                    toggleSecure: nil,
-                    qrValue: parentPublic,
-                    showsShareButton: true,
-                    shareAction: { presentShare([parentPublic]) }
-                )
-
-                QRCodeCard(
-                    title: "Parent Secret Key",
-                    content: .secure(
-                        label: "Parent nsec",
-                        value: secret,
-                        revealed: viewModel.parentSecretVisible
-                    ),
-                    footer: "Keep this secret offline. It grants full access to this family.",
-                    copyAction: { copyToPasteboard(secret) },
-                    toggleSecure: { viewModel.toggleParentSecretVisibility() },
-                    qrValue: viewModel.parentSecretVisible ? secret : nil,
-                    showsShareButton: viewModel.parentSecretVisible,
-                    shareAction: viewModel.parentSecretVisible ? { presentShare([secret]) } : nil
-                )
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Parent Identity")
+                        .font(.headline)
+                    Text("Your parent identity key for this family")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    Text(parentPublic)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(uiColor: .secondarySystemBackground))
+                        .cornerRadius(8)
+                    
+                    HStack(spacing: 12) {
+                        Button {
+                            presentShare([parentPublic])
+                        } label: {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        
+                        Button {
+                            copyToPasteboard(parentPublic)
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .controlSize(.small)
+                }
             }
 
             VStack(alignment: .leading, spacing: 12) {
@@ -1617,36 +1558,70 @@ private extension ParentZoneView {
                     .foregroundStyle(.secondary)
             }
 
-            if let followInvite = viewModel.followInvite(for: child),
-               let followURL = followInvite.encodedURL {
-                let summary = "Parent: \(shortKey(followInvite.parentPublicKey))\nChild: \(shortKey(followInvite.childPublicKey))"
-                    QRCodeCard(
-                        title: "\(child.displayName) Marmot Invite",
-                        content: .text(label: "Autofill Keys", value: summary),
-                        footer: "Share once so the other parent gets both keys in a single scan for their Marmot invite.",
-                    copyAction: { copyToPasteboard(followURL) },
-                    toggleSecure: nil,
-                    qrValue: followURL,
-                    showsShareButton: true,
-                    shareAction: { presentShare(followInvite.shareItems) }
-                )
+            if let followInvite = viewModel.followInvite(for: child) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(child.displayName) Marmot Invite")
+                        .font(.headline)
+                    Text("Share this invite with other parents to connect.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    HStack(spacing: 12) {
+                        Button {
+                            presentShare(followInvite.shareItems)
+                        } label: {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        
+                        Button {
+                            copyToPasteboard(followInvite.encodedURL ?? followInvite.shareText)
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.vertical, 8)
             }
 
             if isExpanded {
                 Divider()
 
-                if let npub = child.publicKey {
-                    QRCodeCard(
-                        title: "\(child.displayName) Public Key",
-                        content: .text(label: "\(child.displayName) npub", value: npub),
-                        footer: "Share this with approved families so they can join \(child.displayName)'s Marmot group.",
-                        copyAction: { copyToPasteboard(npub) },
-                        toggleSecure: nil,
-                        qrValue: npub,
-                        showsShareButton: true,
-                        shareAction: { presentShare([npub]) }
-                    )
-                } else {
+                if let invite = viewModel.childDeviceInvite(for: child) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("\(child.displayName) Device Invite")
+                            .font(.headline)
+                        Text("Share this on the child's device to import profile and connect to your family.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        
+                        HStack(spacing: 12) {
+                            Button {
+                                if let inviteURL = invite.encodedURL {
+                                    presentShare(invite.shareItems)
+                                }
+                            } label: {
+                                Label("Share", systemImage: "square.and.arrow.up")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            
+                            Button {
+                                copyToPasteboard(invite.encodedURL ?? invite.shareText)
+                            } label: {
+                                Label("Copy", systemImage: "doc.on.doc")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 8)
+                } else if child.identity == nil {
                     Text("No key created yet for this profile.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -1654,51 +1629,6 @@ private extension ParentZoneView {
                         viewModel.generateChildKey(for: child.id)
                     }
                     .buttonStyle(.bordered)
-                }
-
-                if let secret = child.secretKey {
-                    let revealed = viewModel.isChildSecretVisible(child.id)
-                    QRCodeCard(
-                        title: "\(child.displayName) Secret Key",
-                        content: .secure(
-                            label: "\(child.displayName) nsec",
-                            value: secret,
-                            revealed: revealed
-                        ),
-                        footer: "Reveal only when you need to import this child on another device.",
-                        copyAction: { copyToPasteboard(secret) },
-                        toggleSecure: { viewModel.toggleChildSecretVisibility(child.id) },
-                        qrValue: revealed ? secret : nil,
-                        showsShareButton: revealed,
-                        shareAction: revealed ? { presentShare([secret]) } : nil
-                    )
-                }
-
-                if let delegation = child.delegationTag {
-                    QRCodeCard(
-                        title: "\(child.displayName) Delegation",
-                        content: .text(label: "Delegation Tag", value: delegation),
-                        footer: "Provide to another device if it needs to verify this delegation.",
-                        copyAction: { copyToPasteboard(delegation) },
-                        toggleSecure: nil,
-                        qrValue: delegation,
-                        showsShareButton: true,
-                        shareAction: { presentShare([delegation]) }
-                    )
-                }
-
-                if let invite = viewModel.childDeviceInvite(for: child),
-                   let inviteURL = invite.encodedURL {
-                    QRCodeCard(
-                        title: "\(child.displayName) Device Invite",
-                        content: .text(label: "Invite Link", value: inviteURL),
-                        footer: "Scan on the child's device to import keys, delegation, and connect to your family.",
-                        copyAction: { copyToPasteboard(inviteURL) },
-                        toggleSecure: nil,
-                        qrValue: inviteURL,
-                        showsShareButton: true,
-                        shareAction: { presentShare(invite.shareItems) }
-                    )
                 }
 
                 VStack(alignment: .leading, spacing: 6) {

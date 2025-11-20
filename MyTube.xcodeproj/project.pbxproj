@@ -461,6 +461,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Tubestr;
+				"INFOPLIST_KEY_CFBundleURLTypes[0][CFBundleTypeRole]" = Editor;
+				"INFOPLIST_KEY_CFBundleURLTypes[0][CFBundleURLName]" = "app.tubestr.mobile";
+				"INFOPLIST_KEY_CFBundleURLTypes[0][CFBundleURLSchemes][0]" = tubestr;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSCameraUsageDescription = "MyTube needs the camera so kids can record their own videos.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID lets parents unlock MyTube controls securely.";
@@ -497,6 +500,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Tubestr;
+				"INFOPLIST_KEY_CFBundleURLTypes[0][CFBundleTypeRole]" = Editor;
+				"INFOPLIST_KEY_CFBundleURLTypes[0][CFBundleURLName]" = "app.tubestr.mobile";
+				"INFOPLIST_KEY_CFBundleURLTypes[0][CFBundleURLSchemes][0]" = tubestr;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				INFOPLIST_KEY_NSCameraUsageDescription = "MyTube needs the camera so kids can record their own videos.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID lets parents unlock MyTube controls securely.";
